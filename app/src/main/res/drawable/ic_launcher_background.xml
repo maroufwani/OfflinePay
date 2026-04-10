@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Deep indigo background matching app Primary #1A237E -->
+    <path
+        android:fillColor="#1A237E"
+        android:pathData="M0,0h108v108h-108z" />
+    <!-- Teal banner at bottom matching app Accent #00897B -->
+    <path
+        android:fillColor="#00897B"
+        android:pathData="M0,82h108v26h-108z" />
+</vector>

@@ -1,0 +1,31 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Rupee symbol (?) - white, centered in safe zone -->
+    <!-- Top horizontal bar -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,32h32c1.7,0 3,1.3 3,3s-1.3,3 -3,3h-32c-1.7,0 -3,-1.3 -3,-3s1.3,-3 3,-3z" />
+
+    <!-- Second horizontal bar -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,42h32c1.7,0 3,1.3 3,3s-1.3,3 -3,3h-32c-1.7,0 -3,-1.3 -3,-3s1.3,-3 3,-3z" />
+
+    <!-- Curved stroke from top-right going down-left (main body of ?) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M62,32c4,3 6,7 6,13c0,8 -5,14 -13,16L42,78c-0.8,1.2 -2.5,1.5 -3.8,0.6c-1.2,-0.8 -1.5,-2.5 -0.6,-3.8L50,58c-5,-1 -9,-4.5 -11,-9h6c2,4 5.5,6 10,6c5,0 9,-3.5 9,-10c0,-4.5 -1.5,-7.5 -4.5,-10L62,32z" />
+
+    <!-- "OFFLINE" text hint in teal banner area -->
+    <!-- Using small rectangles as a stylized "OFFLINE" indicator -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M33,88h42c0.8,0 1.5,0.7 1.5,1.5s-0.7,1.5 -1.5,1.5h-42c-0.8,0 -1.5,-0.7 -1.5,-1.5s0.7,-1.5 1.5,-1.5z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M40,92h28c0.8,0 1.5,0.7 1.5,1.5s-0.7,1.5 -1.5,1.5h-28c-0.8,0 -1.5,-0.7 -1.5,-1.5s0.7,-1.5 1.5,-1.5z" />
+</vector>

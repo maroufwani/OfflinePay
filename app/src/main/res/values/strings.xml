@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Offline Pay</string>
+    <string name="accessibility_service_description">Assists with navigating USSD menus during payment flows. This service only reads USSD dialog content to help complete your transactions faster. This app is not affiliated with or endorsed by NPCI or any bank.</string>
+</resources>
