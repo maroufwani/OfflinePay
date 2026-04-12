@@ -44,7 +44,7 @@ class UssdAccessibilityService : AccessibilityService() {
             svc.lastProcessedText = ""
             svc.waitingForSendCallback = false
 
-            Log.d(TAG, "send('$text')")
+            Log.d(TAG, "send('${if (text.all { it.isDigit() } && text.length in 4..6) "****" else text}')")
             val root = findPhoneDialogRoot(svc)
             if (root == null) {
                 Log.w(TAG, "send() could not find phone dialog root")
@@ -114,9 +114,11 @@ class UssdAccessibilityService : AccessibilityService() {
                     data
                 )
             }
+            // Avoid logging sensitive data (PIN)
+            val logData = if (data.all { it.isDigit() } && data.length in 4..6) "****" else "'$data'"
             for (leaf in leaves) {
                 if (leaf.className?.toString() == "android.widget.EditText") {
-                    Log.d(TAG, "Found EditText, setting text: '$data'")
+                    Log.d(TAG, "Found EditText, setting text: $logData")
                     if (!leaf.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)) {
                         // Fallback: clipboard paste
                         Log.d(TAG, "ACTION_SET_TEXT failed, trying paste fallback")
@@ -125,6 +127,8 @@ class UssdAccessibilityService : AccessibilityService() {
                                     as? ClipboardManager
                             cm?.setPrimaryClip(ClipData.newPlainText("ussd", data))
                             leaf.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+                            // Clear clipboard immediately to avoid leaking sensitive data
+                            cm?.setPrimaryClip(ClipData.newPlainText("", ""))
                         } catch (e: Exception) {
                             Log.e(TAG, "Paste fallback failed", e)
                         }

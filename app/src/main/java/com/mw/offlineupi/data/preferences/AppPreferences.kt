@@ -13,6 +13,7 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKeys
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "app_preferences")
@@ -37,11 +38,14 @@ class AppPreferences(private val context: Context) {
         private val KEY_SIM_SLOT = intPreferencesKey("sim_slot")
         private val KEY_APP_LOCK_ENABLED = booleanPreferencesKey("app_lock_enabled")
         private val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
+        private val KEY_IGNORED_UPDATE_VERSION = stringPreferencesKey("ignored_update_version")
+        private val KEY_REMIND_LATER_TIME = stringPreferencesKey("remind_later_time")
 
         // Keys for encrypted prefs
         private const val ENC_PHONE_NUMBER = "phone_number"
         private const val ENC_LAST_BALANCE = "last_balance"
         private const val ENC_LAST_BALANCE_TIME = "last_balance_time"
+        private const val ENC_UPI_PIN = "upi_pin"
     }
 
     // Flows backed by encrypted prefs
@@ -95,5 +99,39 @@ class AppPreferences(private val context: Context) {
 
     suspend fun setThemeMode(value: String) {
         context.dataStore.edit { it[KEY_THEME_MODE] = value }
+    }
+
+    fun setEncryptedUpiPin(pin: String) {
+        encryptedPrefs.edit().putString(ENC_UPI_PIN, pin).apply()
+    }
+
+    fun getEncryptedUpiPin(): String? {
+        return encryptedPrefs.getString(ENC_UPI_PIN, null)
+    }
+
+    fun clearEncryptedUpiPin() {
+        encryptedPrefs.edit().remove(ENC_UPI_PIN).apply()
+    }
+
+    fun hasEncryptedUpiPin(): Boolean {
+        return !encryptedPrefs.getString(ENC_UPI_PIN, null).isNullOrEmpty()
+    }
+
+    suspend fun setIgnoredUpdateVersion(version: String) {
+        context.dataStore.edit { it[KEY_IGNORED_UPDATE_VERSION] = version }
+    }
+
+    suspend fun getIgnoredUpdateVersion(): String {
+        return context.dataStore.data.map { it[KEY_IGNORED_UPDATE_VERSION] ?: "" }.first()
+    }
+
+    suspend fun setRemindLaterTime(time: Long) {
+        context.dataStore.edit { it[KEY_REMIND_LATER_TIME] = time.toString() }
+    }
+
+    suspend fun getRemindLaterTime(): Long {
+        return context.dataStore.data.map {
+            (it[KEY_REMIND_LATER_TIME] ?: "0").toLongOrNull() ?: 0L
+        }.first()
     }
 }

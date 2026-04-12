@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Policy
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.SimCard
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -63,6 +64,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -70,6 +72,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.mw.offlineupi.ui.components.UpdateDialog
 import com.mw.offlineupi.util.SecurityUtil
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -82,6 +85,7 @@ fun SettingsScreen(
     val context = LocalContext.current
     var showThemeDialog by remember { mutableStateOf(false) }
     var showSimDropdown by remember { mutableStateOf(false) }
+    var showPinDialog by remember { mutableStateOf(false) }
     fun openUrl(url: String) {
         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK
@@ -199,7 +203,8 @@ fun SettingsScreen(
                 SettingsSwitchItem(
                     icon = Icons.Default.Fingerprint,
                     title = "Biometric for Payments",
-                    subtitle = "Require biometric before sending payments",
+                    subtitle = if (state.biometricEnabled) "Biometric replaces UPI PIN entry"
+                    else "Use biometric to auto-fill UPI PIN",
                     checked = state.biometricEnabled,
                     onCheckedChange = { enabled ->
                         if (enabled) {
@@ -209,7 +214,7 @@ fun SettingsScreen(
                                     activity = activity,
                                     title = "Enable Biometric",
                                     subtitle = "Verify to enable biometric for payments",
-                                    onSuccess = { viewModel.setBiometric(true) },
+                                    onSuccess = { showPinDialog = true },
                                     onError = { msg ->
                                         Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                                     }
@@ -322,6 +327,18 @@ fun SettingsScreen(
                         )
                     }
                 )
+                SettingsDivider()
+                SettingsClickItem(
+                    icon = Icons.Default.SystemUpdate,
+                    title = "Check for Updates",
+                    subtitle = if (state.updateCheckInProgress) "Checking..."
+                    else state.updateCheckMessage ?: "Tap to check for new versions",
+                    onClick = {
+                        if (!state.updateCheckInProgress) {
+                            viewModel.checkForUpdates()
+                        }
+                    }
+                )
             }
 
             Spacer(modifier = Modifier.height(20.dp))
@@ -378,7 +395,10 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                "v0.1.0-beta",
+                "v${
+                    try { context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "0.1.0-beta" }
+                    catch (_: Exception) { "0.1.0-beta" }
+                }",
                 style = MaterialTheme.typography.labelSmall,
                 textAlign = TextAlign.Center,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
@@ -397,6 +417,35 @@ fun SettingsScreen(
                 showThemeDialog = false
             },
             onDismiss = { showThemeDialog = false }
+        )
+    }
+
+    if (showPinDialog) {
+        UpiPinDialog(
+            onConfirm = { pin ->
+                viewModel.saveUpiPin(pin)
+                viewModel.setBiometric(true)
+                showPinDialog = false
+                Toast.makeText(context, "Biometric payment enabled", Toast.LENGTH_SHORT).show()
+            },
+            onDismiss = { showPinDialog = false }
+        )
+    }
+
+    state.availableUpdate?.let { update ->
+        UpdateDialog(
+            update = update,
+            onInstall = {
+                viewModel.dismissUpdate()
+                val url = update.downloadUrl.ifEmpty { update.htmlUrl }
+                context.startActivity(
+                    Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                )
+            },
+            onRemindLater = { viewModel.remindLater() },
+            onIgnore = { viewModel.ignoreUpdate(update.versionName) }
         )
     }
 }
@@ -605,5 +654,193 @@ private fun ThemeOption(
             modifier = Modifier.weight(1f)
         )
         RadioButton(selected = selected, onClick = onClick)
+    }
+}
+
+@Composable
+private fun UpiPinDialog(
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var pin by remember { mutableStateOf("") }
+    var confirmPin by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    var step by remember { mutableStateOf(1) } // 1 = enter, 2 = confirm
+
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                Icons.Default.Lock,
+                contentDescription = null,
+                modifier = Modifier.size(28.dp),
+                tint = MaterialTheme.colorScheme.primary
+            )
+        },
+        title = {
+            Text(
+                if (step == 1) "Enter UPI PIN" else "Confirm UPI PIN",
+                fontWeight = FontWeight.SemiBold
+            )
+        },
+        text = {
+            Column {
+                Text(
+                    if (step == 1) "Enter your UPI PIN to store securely for biometric payments."
+                    else "Re-enter your UPI PIN to confirm.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                PinDotsRow(
+                    pinLength = if (step == 1) pin.length else confirmPin.length,
+                    maxLength = 6
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                PinNumpad(
+                    onDigit = { digit ->
+                        if (step == 1 && pin.length < 6) {
+                            pin += digit
+                            error = null
+                        } else if (step == 2 && confirmPin.length < 6) {
+                            confirmPin += digit
+                            error = null
+                        }
+                    },
+                    onBackspace = {
+                        if (step == 1 && pin.isNotEmpty()) {
+                            pin = pin.dropLast(1)
+                            error = null
+                        } else if (step == 2 && confirmPin.isNotEmpty()) {
+                            confirmPin = confirmPin.dropLast(1)
+                            error = null
+                        }
+                    }
+                )
+                if (error != null) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        error!!,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(
+                onClick = {
+                    if (step == 1) {
+                        if (pin.length < 4) {
+                            error = "PIN must be 4-6 digits"
+                        } else {
+                            step = 2
+                            error = null
+                        }
+                    } else {
+                        if (confirmPin != pin) {
+                            error = "PINs don't match"
+                            confirmPin = ""
+                        } else {
+                            onConfirm(pin)
+                        }
+                    }
+                }
+            ) {
+                Text(if (step == 1) "Next" else "Confirm")
+            }
+        },
+        dismissButton = {
+            androidx.compose.material3.TextButton(onClick = {
+                if (step == 2) {
+                    step = 1
+                    confirmPin = ""
+                    error = null
+                } else {
+                    onDismiss()
+                }
+            }) {
+                Text(if (step == 2) "Back" else "Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+private fun PinDotsRow(pinLength: Int, maxLength: Int) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Center
+    ) {
+        repeat(maxLength) { index ->
+            Box(
+                modifier = Modifier
+                    .padding(horizontal = 6.dp)
+                    .size(14.dp)
+                    .clip(CircleShape)
+                    .background(
+                        if (index < pinLength) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.outlineVariant
+                    )
+            )
+        }
+    }
+}
+
+@Composable
+private fun PinNumpad(
+    onDigit: (String) -> Unit,
+    onBackspace: () -> Unit
+) {
+    val keys = listOf(
+        listOf("1", "2", "3"),
+        listOf("4", "5", "6"),
+        listOf("7", "8", "9"),
+        listOf("", "0", "⌫")
+    )
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        for (row in keys) {
+            Row(
+                horizontalArrangement = Arrangement.Center,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                for (key in row) {
+                    Box(
+                        modifier = Modifier
+                            .size(56.dp)
+                            .padding(4.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (key.isNotEmpty()) MaterialTheme.colorScheme.surfaceContainerHigh
+                                else Color.Transparent
+                            )
+                            .then(
+                                if (key.isNotEmpty()) Modifier.clickable {
+                                    if (key == "⌫") onBackspace() else onDigit(key)
+                                } else Modifier
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (key == "⌫") {
+                            Icon(
+                                Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Backspace",
+                                modifier = Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        } else if (key.isNotEmpty()) {
+                            Text(
+                                key,
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }

@@ -6,6 +6,8 @@ import androidx.lifecycle.viewModelScope
 import com.mw.offlineupi.OfflineUpiApp
 import com.mw.offlineupi.data.local.entity.UserProfile
 import com.mw.offlineupi.service.UssdManager
+import com.mw.offlineupi.util.AppUpdate
+import com.mw.offlineupi.util.UpdateChecker
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
@@ -17,7 +19,10 @@ data class SettingsState(
     val themeMode: String = "system",
     val selectedSim: Int = 0,
     val accessibilityEnabled: Boolean = false,
-    val userProfile: UserProfile? = null
+    val userProfile: UserProfile? = null,
+    val updateCheckInProgress: Boolean = false,
+    val availableUpdate: AppUpdate? = null,
+    val updateCheckMessage: String? = null
 )
 
 class SettingsViewModel(application: Application) : AndroidViewModel(application) {
@@ -52,6 +57,17 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun setBiometric(enabled: Boolean) {
         _state.value = _state.value.copy(biometricEnabled = enabled)
         viewModelScope.launch { app.preferences.setBiometricEnabled(enabled) }
+        if (!enabled) {
+            app.preferences.clearEncryptedUpiPin()
+        }
+    }
+
+    fun saveUpiPin(pin: String) {
+        app.preferences.setEncryptedUpiPin(pin)
+    }
+
+    fun hasStoredPin(): Boolean {
+        return app.preferences.hasEncryptedUpiPin()
     }
 
     fun setTheme(mode: String) {
@@ -68,5 +84,45 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun setSim(slot: Int) {
         _state.value = _state.value.copy(selectedSim = slot)
         viewModelScope.launch { app.preferences.setSimSlot(slot) }
+    }
+
+    fun checkForUpdates() {
+        _state.value = _state.value.copy(updateCheckInProgress = true, updateCheckMessage = null)
+        viewModelScope.launch {
+            val currentVersion = try {
+                app.packageManager.getPackageInfo(app.packageName, 0).versionName ?: ""
+            } catch (_: Exception) { "" }
+
+            val update = UpdateChecker.checkForUpdate(currentVersion)
+            if (update != null) {
+                _state.value = _state.value.copy(
+                    updateCheckInProgress = false,
+                    availableUpdate = update
+                )
+            } else {
+                _state.value = _state.value.copy(
+                    updateCheckInProgress = false,
+                    updateCheckMessage = "You're on the latest version"
+                )
+            }
+        }
+    }
+
+    fun dismissUpdate() {
+        _state.value = _state.value.copy(availableUpdate = null)
+    }
+
+    fun ignoreUpdate(version: String) {
+        _state.value = _state.value.copy(availableUpdate = null)
+        viewModelScope.launch { app.preferences.setIgnoredUpdateVersion(version) }
+    }
+
+    fun remindLater() {
+        _state.value = _state.value.copy(availableUpdate = null)
+        viewModelScope.launch { app.preferences.setRemindLaterTime(System.currentTimeMillis()) }
+    }
+
+    fun clearUpdateMessage() {
+        _state.value = _state.value.copy(updateCheckMessage = null)
     }
 }

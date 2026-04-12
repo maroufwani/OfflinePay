@@ -14,6 +14,7 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityManager
 import androidx.core.content.ContextCompat
+import com.mw.offlineupi.BiometricAuthActivity
 import com.mw.offlineupi.OfflineUpiApp
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -561,6 +562,11 @@ object UssdManager {
                     return
                 }
 
+                // Check if biometric auto-fill is available (first attempt only)
+                if (wrongPinAttempts == 0 && tryBiometricPinAutoFill()) {
+                    return
+                }
+
                 // Waiting for user PIN — no timeout here (user interaction)
                 pinSubmitted = false
                 if (wrongPinAttempts > 0) {
@@ -750,6 +756,69 @@ object UssdManager {
         // Unknown USSD responses should not silently appear as successful transactions.
         Log.w(TAG, "Unrecognized final response, treating as failure: $responseText")
         failSession(responseText.take(200).ifBlank { "Unexpected USSD response" })
+    }
+
+    /**
+     * Check if biometric PIN auto-fill is available and initiate it.
+     * Returns true if biometric flow was started, false if manual PIN entry should be shown.
+     */
+    private fun tryBiometricPinAutoFill(): Boolean {
+        val ctx = appContext ?: return false
+        val app = ctx as? OfflineUpiApp ?: return false
+
+        val biometricEnabled = try {
+            kotlinx.coroutines.runBlocking { app.preferences.biometricEnabled.first() }
+        } catch (_: Exception) { false }
+
+        if (!biometricEnabled || !app.preferences.hasEncryptedUpiPin()) {
+            return false
+        }
+
+        Log.d(TAG, "Biometric PIN auto-fill: launching biometric auth")
+        _state.value = UssdState.Processing("Authenticating...", 0.9f)
+        OverlayManager.showProgress("Waiting for biometric...", "Authenticate to authorize payment")
+
+        BiometricAuthActivity.onBiometricSuccess = {
+            Log.d(TAG, "Biometric auth succeeded, auto-filling PIN")
+            val storedPin = app.preferences.getEncryptedUpiPin()
+            if (storedPin != null) {
+                sendPinResponse(storedPin)
+            } else {
+                Log.w(TAG, "Stored PIN is null after biometric success")
+                // Fall back to manual PIN entry
+                _state.value = UssdState.WaitingForPin("Enter UPI PIN")
+                OverlayManager.showPinEntry(
+                    "Enter UPI PIN",
+                    payeeName = verifiedPayeeName ?: currentCommand?.recipientId,
+                    amount = lastSubmittedAmount.ifEmpty { currentCommand?.amount }.takeIf { !it.isNullOrEmpty() }
+                )
+            }
+        }
+        BiometricAuthActivity.onBiometricError = { msg ->
+            Log.d(TAG, "Biometric auth failed: $msg — falling back to manual PIN entry")
+            // Fall back to manual PIN entry
+            _state.value = UssdState.WaitingForPin("Enter UPI PIN")
+            OverlayManager.showPinEntry(
+                "Enter UPI PIN",
+                payeeName = verifiedPayeeName ?: currentCommand?.recipientId,
+                amount = lastSubmittedAmount.ifEmpty { currentCommand?.amount }.takeIf { !it.isNullOrEmpty() }
+            )
+        }
+
+        try {
+            val intent = android.content.Intent(ctx, BiometricAuthActivity::class.java).apply {
+                flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                        android.content.Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+            }
+            ctx.startActivity(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to launch BiometricAuthActivity", e)
+            BiometricAuthActivity.onBiometricSuccess = null
+            BiometricAuthActivity.onBiometricError = null
+            return false
+        }
+
+        return true
     }
 
     fun sendPinResponse(pin: String) {

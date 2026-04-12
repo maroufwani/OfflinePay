@@ -65,6 +65,11 @@ import com.mw.offlineupi.ui.components.PrimaryButton
 import com.mw.offlineupi.ui.theme.Primary
 import com.mw.offlineupi.ui.theme.PrimaryDark
 import com.mw.offlineupi.ui.theme.Success
+import com.mw.offlineupi.service.UssdManager
+import androidx.compose.runtime.DisposableEffect
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.launch
 
 @Composable
@@ -73,8 +78,50 @@ fun OnboardingScreen(
     viewModel: OnboardingViewModel = viewModel()
 ) {
     val state by viewModel.state.collectAsState()
-    val pagerState = rememberPagerState(pageCount = { 6 })
+    val pagerState = rememberPagerState(pageCount = { 5 })
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+
+    var permissionsGranted by remember {
+        mutableStateOf(
+            arrayOf(
+                Manifest.permission.CALL_PHONE,
+                Manifest.permission.READ_PHONE_STATE,
+                Manifest.permission.CAMERA
+            ).all {
+                ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+            }
+        )
+    }
+    var accessibilityEnabled by remember {
+        mutableStateOf(UssdManager.isAccessibilityEnabled(context))
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                accessibilityEnabled = UssdManager.isAccessibilityEnabled(context)
+                permissionsGranted = arrayOf(
+                    Manifest.permission.CALL_PHONE,
+                    Manifest.permission.READ_PHONE_STATE,
+                    Manifest.permission.CAMERA
+                ).all {
+                    ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    val isNextEnabled = when (state.currentPage) {
+        2 -> permissionsGranted
+        3 -> accessibilityEnabled
+        else -> true
+    }
 
     LaunchedEffect(state.currentPage) {
         pagerState.animateScrollToPage(state.currentPage)
@@ -100,14 +147,13 @@ fun OnboardingScreen(
                     selectedSim = state.selectedSim,
                     onSimSelected = viewModel::selectSim
                 )
-                2 -> PermissionsPage()
-                3 -> AccessibilityConsentPage()
-                4 -> ProfileFetchPage(
-                    state = state,
-                    onFetchProfile = viewModel::fetchProfile,
-                    onSkip = viewModel::skipProfile
+                2 -> PermissionsPage(
+                    onPermissionsChanged = { permissionsGranted = it }
                 )
-                5 -> ReadyPage()
+                3 -> AccessibilityConsentPage(
+                    isAccessibilityEnabled = accessibilityEnabled
+                )
+                4 -> ReadyPage()
             }
         }
 
@@ -116,7 +162,7 @@ fun OnboardingScreen(
             horizontalArrangement = Arrangement.Center,
             modifier = Modifier.padding(16.dp)
         ) {
-            repeat(6) { index ->
+            repeat(5) { index ->
                 Box(
                     modifier = Modifier
                         .padding(horizontal = 4.dp)
@@ -137,7 +183,7 @@ fun OnboardingScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        if (state.currentPage == 5) {
+        if (state.currentPage == 4) {
             PrimaryButton(
                 text = "Get Started",
                 onClick = { viewModel.completeOnboarding(onOnboardingComplete) },
@@ -169,6 +215,7 @@ fun OnboardingScreen(
                             }
                         }
                     },
+                    enabled = isNextEnabled,
                     shape = RoundedCornerShape(14.dp),
                     modifier = Modifier.height(48.dp),
                     colors = ButtonDefaults.buttonColors(
@@ -325,7 +372,7 @@ private fun SimOption(label: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun PermissionsPage() {
+private fun PermissionsPage(onPermissionsChanged: (Boolean) -> Unit = {}) {
     val context = LocalContext.current
 
     val requiredPermissions = arrayOf(
@@ -338,6 +385,10 @@ private fun PermissionsPage() {
         mutableStateOf(requiredPermissions.all {
             ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
         })
+    }
+
+    LaunchedEffect(allGranted) {
+        onPermissionsChanged(allGranted)
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -476,7 +527,7 @@ private fun PermissionRow(label: String, description: String, granted: Boolean) 
 }
 
 @Composable
-private fun AccessibilityConsentPage() {
+private fun AccessibilityConsentPage(isAccessibilityEnabled: Boolean = false) {
     val context = LocalContext.current
     Column(
         modifier = Modifier.fillMaxSize(),
@@ -541,6 +592,24 @@ private fun AccessibilityConsentPage() {
             textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
         )
+        if (isAccessibilityEnabled) {
+            Spacer(modifier = Modifier.height(20.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.CheckCircle,
+                    contentDescription = null,
+                    tint = Success,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    "Accessibility service enabled",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Success
+                )
+            }
+        }
     }
 }
 
