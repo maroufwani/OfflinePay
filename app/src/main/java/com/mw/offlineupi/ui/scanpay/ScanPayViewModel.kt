@@ -9,6 +9,7 @@ import com.mw.offlineupi.service.UssdCommand
 import com.mw.offlineupi.service.UssdCommandType
 import com.mw.offlineupi.service.UssdManager
 import com.mw.offlineupi.service.UssdState
+import com.mw.offlineupi.util.QrParseResult
 import com.mw.offlineupi.util.UpiPaymentInfo
 import com.mw.offlineupi.util.UpiQrParser
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -29,9 +30,18 @@ class ScanPayViewModel(application: Application) : AndroidViewModel(application)
     private var lastTransactionId: Long = -1
     private var wasWaitingForInput = false
 
+    /**
+     * Token of the USSD session this ViewModel started, or -1 when it has none in flight.
+     * Every payment screen collects the same global [UssdManager.state], so terminal states are
+     * only acted on by the ViewModel that owns the session — otherwise two live ViewModels each
+     * wrote their own history row for one payment.
+     */
+    private var sessionToken: Long = -1
+
     init {
         viewModelScope.launch {
             UssdManager.state.collect { ussd ->
+                if (sessionToken < 0 || !UssdManager.ownsSession(sessionToken)) return@collect
                 when (ussd) {
                     is UssdState.WaitingForInput -> {
                         wasWaitingForInput = true
@@ -88,14 +98,19 @@ class ScanPayViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun onQrScanned(rawData: String) {
-        val info = UpiQrParser.parse(rawData)
-        if (info != null) {
-            _state.value = _state.value.copy(
-                paymentInfo = info,
-                isScanning = false
-            )
-        } else {
-            _state.value = _state.value.copy(error = "Invalid UPI QR code")
+        // parseDetailed, not parse: the reason a QR was refused is worth showing. "Invalid UPI QR
+        // code" for a foreign-currency or non-UPI code just made the user rescan it.
+        when (val result = UpiQrParser.parseDetailed(rawData)) {
+            is QrParseResult.Success -> {
+                _state.value = _state.value.copy(
+                    paymentInfo = result.info,
+                    isScanning = false
+                )
+            }
+
+            is QrParseResult.Rejected -> {
+                _state.value = _state.value.copy(error = result.reason)
+            }
         }
     }
 
@@ -105,19 +120,21 @@ class ScanPayViewModel(application: Application) : AndroidViewModel(application)
 
     fun initiatePayment() {
         val info = _state.value.paymentInfo ?: return
-
-        UssdManager.startCommand(
-            app,
-            UssdCommand(
-                type = UssdCommandType.SEND_MONEY,
-                recipientId = info.payeeAddress,
-                amount = "",
-                note = ""
+        viewModelScope.launch {
+            UssdManager.startCommand(
+                app,
+                UssdCommand(
+                    type = UssdCommandType.SEND_MONEY,
+                    recipientId = info.payeeAddress,
+                    amount = "",
+                    note = ""
+                )
             )
-        )
+            sessionToken = UssdManager.currentSessionOwner
+        }
     }
 
-    fun sendPin(pin: String) {
+    fun sendPin(pin: CharArray) {
         UssdManager.sendPinResponse(pin)
     }
 
@@ -125,12 +142,14 @@ class ScanPayViewModel(application: Application) : AndroidViewModel(application)
         _state.value = ScanPayState()
         lastTransactionId = -1
         wasWaitingForInput = false
+        sessionToken = -1
         UssdManager.reset()
     }
 
     fun resetUssd() {
         lastTransactionId = -1
         wasWaitingForInput = false
+        sessionToken = -1
         UssdManager.reset()
     }
 }

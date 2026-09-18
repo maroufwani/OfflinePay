@@ -1,6 +1,7 @@
 package com.mw.offlineupi.service
 
 import android.Manifest
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -14,12 +15,19 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityManager
 import androidx.core.content.ContextCompat
+import com.mw.offlineupi.util.DiagnosticLog
 import com.mw.offlineupi.BiometricAuthActivity
 import com.mw.offlineupi.OfflineUpiApp
+import com.mw.offlineupi.util.CharArrayCharSequence
+import com.mw.offlineupi.util.Validators
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 
 sealed class UssdState {
     object Idle : UssdState()
@@ -32,7 +40,18 @@ sealed class UssdState {
     ) : UssdState()
     data class WaitingForInput(val message: String, val verifiedName: String? = null) : UssdState()
     data class Success(val message: String, val referenceId: String? = null, val verifiedPayeeName: String? = null) : UssdState()
-    data class Failed(val reason: String, val canRetry: Boolean = true) : UssdState()
+
+    /**
+     * @param unrecognizedResponse the bank's raw final text, set only when the failure *is*
+     *   "the app could not classify this reply". Every other failure — a decline, a timeout, a
+     *   wrong-PIN lockout — leaves it null. The UI offers to report it; see
+     *   [com.mw.offlineupi.util.shareUnrecognisedResponse].
+     */
+    data class Failed(
+        val reason: String,
+        val canRetry: Boolean = true,
+        val unrecognizedResponse: String? = null
+    ) : UssdState()
 }
 
 data class UssdCommand(
@@ -67,10 +86,38 @@ object UssdManager {
     private var messageQueue: List<String> = emptyList()
     private var sessionComplete = false
     private var simSlot = 0
+    private var cachedBiometricEnabled: Boolean = false
+
+    /**
+     * Whether a PIN is stored, read once per session in [startCommand]. Cached because the check
+     * is now a suspend call (DataStore) and the PIN-prompt path runs inside a non-suspend
+     * accessibility callback.
+     */
+    private var cachedHasStoredPin: Boolean = false
+
+    /**
+     * Scope for the few genuinely asynchronous steps that start from non-suspend callbacks
+     * (reading the auth-bound PIN after a biometric success). `Main.immediate` keeps the state
+     * machine on the main thread, which every other part of this object already assumes; the
+     * suspend functions it calls switch to IO internally.
+     */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var wrongPinAttempts = 0
     private var pinSubmitted = false
-    private var pendingPin: String? = null
+
+    /**
+     * PIN carried across a re-dial after a wrong-PIN attempt, held as a [CharArray] so it can be
+     * wiped. Always clear it through [clearPendingPin] — a `String` here would leave the PIN
+     * recoverable from the heap for the lifetime of the process.
+     */
+    private var pendingPin: CharArray? = null
     private const val MAX_PIN_ATTEMPTS = 3
+
+    /** Zeroes and drops [pendingPin]. Safe to call when nothing is pending. */
+    private fun clearPendingPin() {
+        pendingPin?.fill(' ')
+        pendingPin = null
+    }
     @Volatile
     private var cancelRequested = false
 
@@ -135,22 +182,35 @@ object UssdManager {
         Manifest.permission.READ_PHONE_STATE
     )
 
+    /**
+     * Whether *this app's* USSD accessibility service is the one the user enabled.
+     *
+     * Both checks used to be a substring test for the package name, which passes for any
+     * accessibility service shipped by this package and also for any other package whose id merely
+     * contains this one's name. The component is compared properly instead: parsing each id back
+     * into a [ComponentName] normalises the two forms the platform stores it in
+     * (`pkg/.service.UssdAccessibilityService` and `pkg/com.mw.offlineupi.service.…`), which a
+     * string comparison against one spelling would get wrong. This removes the dead
+     * `targetService` string the loose check left behind.
+     *
+     * The `Settings.Secure` fallback stays: [AccessibilityManager.getEnabledAccessibilityServiceList]
+     * has been observed to come back empty on some OEM builds for a moment after the user toggles
+     * a service on, and this gate decides whether a payment can start at all.
+     */
     fun isAccessibilityEnabled(context: Context): Boolean {
+        val target = ComponentName(context.packageName, UssdAccessibilityService::class.java.name)
+
         val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager
-            ?: return false
-        val enabledServices = am.getEnabledAccessibilityServiceList(
+        val enabledServices = am?.getEnabledAccessibilityServiceList(
             AccessibilityEvent.TYPES_ALL_MASK
-        )
-        val targetService = "${context.packageName}/${context.packageName}.service.UssdAccessibilityService"
-        for (service in enabledServices) {
-            if (service.id.contains(context.packageName)) return true
-        }
-        // Also check via Settings.Secure
+        ).orEmpty()
+        if (enabledServices.any { ComponentName.unflattenFromString(it.id) == target }) return true
+
         val enabledString = Settings.Secure.getString(
             context.contentResolver,
             Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         ) ?: return false
-        return enabledString.contains(context.packageName)
+        return enabledString.split(':').any { ComponentName.unflattenFromString(it) == target }
     }
 
     /**
@@ -208,16 +268,28 @@ object UssdManager {
         }
     }
 
+    /**
+     * Whether the SIM looks usable for USSD. USSD rides the cellular signalling channel, not
+     * data, so only SIM readiness and voice registration matter.
+     *
+     * Both reads are inside the `try`: `simState` throws on some OEM builds with no SIM tray, and
+     * `serviceState` throws `SecurityException` on API 31+ when `READ_PHONE_STATE` was revoked
+     * after the check above — an uncaught throw here surfaced as a crash instead of a "no
+     * network" message. Any failure to determine the state is treated as "probably fine" and the
+     * dial is attempted, since a false negative blocks a payment that would have worked.
+     */
     private fun hasCellularConnectivity(context: Context): Boolean {
-        // USSD works over the cellular signaling channel, not data.
-        // We only need the SIM to be registered on a network (voice service).
-        val tm = context.getSystemService(Context.TELEPHONY_SERVICE) as? android.telephony.TelephonyManager
-            ?: return true // Assume connected if we can't check
-        val simState = tm.simState
-        if (simState != android.telephony.TelephonyManager.SIM_STATE_READY) return false
-        // Check if registered on a network (voice/signaling, not data)
-        val serviceState = tm.serviceState
-        return serviceState == null || serviceState.state == android.telephony.ServiceState.STATE_IN_SERVICE
+        val tm = context.getSystemService(Context.TELEPHONY_SERVICE)
+            as? android.telephony.TelephonyManager ?: return true
+        return try {
+            if (tm.simState != android.telephony.TelephonyManager.SIM_STATE_READY) return false
+            val serviceState = tm.serviceState
+            serviceState == null ||
+                serviceState.state == android.telephony.ServiceState.STATE_IN_SERVICE
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not read telephony state: ${e.javaClass.simpleName}")
+            true
+        }
     }
 
     /**
@@ -238,15 +310,36 @@ object UssdManager {
     /**
      * Central failure handler — ensures consistent cleanup.
      */
-    private fun failSession(reason: String, canRetry: Boolean = true) {
+    /**
+     * Central failure handler — ensures consistent cleanup.
+     *
+     * This clears the *whole* session, not just the run flags. Leaving `pendingPin`,
+     * `currentCommand`, `messageQueue`, `verifiedPayeeName` and `lastSubmittedAmount` behind meant
+     * a failed payment left the PIN in memory and let the next, unrelated session inherit the
+     * previous recipient's queue and payee name.
+     */
+    private fun failSession(
+        reason: String,
+        canRetry: Boolean = true,
+        unrecognizedResponse: String? = null
+    ) {
         Log.d(TAG, "failSession: $reason")
         isRunning = false
         sessionComplete = false
         cancelRequested = false
         retryCount = 0
+        pinSubmitted = false
+        clearPendingPin()
+        currentCommand = null
+        currentStep = 0
+        messageQueue = emptyList()
+        verifiedPayeeName = null
+        lastSubmittedAmount = ""
+        lastSubmittedNote = ""
         // Keep isRunning false but set a short window to dismiss stale dialogs
         staleDismissUntil = System.currentTimeMillis() + STALE_DISMISS_WINDOW_MS
-        _state.value = UssdState.Failed(friendlyErrorMessage(reason), canRetry)
+        _state.value =
+            UssdState.Failed(friendlyErrorMessage(reason), canRetry, unrecognizedResponse)
         OverlayManager.hide()
     }
 
@@ -258,6 +351,57 @@ object UssdManager {
     }
 
     /**
+     * Validates a command before any dialing happens.
+     *
+     * This is the one funnel every screen goes through, which is why the check lives here rather
+     * than in each screen: `Validators.isValidAmount` previously had no call sites at all, and the
+     * only real check was an inline one in the overlay's amount field — so the QR-scan and
+     * saved-recipient paths reached the bank unvalidated.
+     *
+     * Returns a user-facing reason, or `null` when the command is fine.
+     */
+    private fun validateCommand(command: UssdCommand): String? {
+        when (command.type) {
+            UssdCommandType.SEND_MONEY, UssdCommandType.REQUEST_MONEY -> {
+                val id = command.recipientId.trim()
+                if (id.isEmpty()) return "No recipient specified"
+                val idOk = if (id.contains("@")) Validators.isValidUpiId(id)
+                else Validators.isValidPhoneNumber(id)
+                if (!idOk) {
+                    return if (id.contains("@")) "Invalid UPI ID. Please check and try again."
+                    else "Invalid mobile number. Please check and try again."
+                }
+                // An empty amount is legitimate here: the two-step flow collects it from the
+                // overlay after the bank verifies the payee name. It is validated on that path by
+                // sendAmountResponse().
+                if (command.amount.isNotEmpty()) {
+                    Validators.amountError(command.amount)?.let { return it }
+                }
+            }
+            UssdCommandType.CHECK_BALANCE, UssdCommandType.MY_PROFILE -> Unit
+        }
+        return null
+    }
+
+    /**
+     * Monotonic session-ownership token, handed to callers by [currentSessionOwner] and checked
+     * with [ownsSession].
+     *
+     * Every screen's ViewModel collects the same global [state], so with two of them alive both
+     * would react to a single Success and each write its own transaction row. A ViewModel now
+     * records the token it started its command with and ignores terminal states that belong to
+     * someone else's session.
+     */
+    @Volatile
+    private var sessionOwner: Long = 0
+
+    /** Token identifying the session started by the most recent [startCommand]. */
+    val currentSessionOwner: Long get() = sessionOwner
+
+    /** True when [token] identifies the session currently in flight. */
+    fun ownsSession(token: Long): Boolean = token == sessionOwner
+
+    /**
      * Post a delayed runnable that is scoped to the current session.
      * If the session has changed by the time the runnable fires, it's a no-op.
      */
@@ -265,28 +409,42 @@ object UssdManager {
         val expectedSession = sessionId
         handler.postDelayed({
             if (sessionId == expectedSession) {
-                action()
+                // These run on the main thread and drive the same accessibility node tree as
+                // onAccessibilityEvent, which already refuses to let a throw escape. This path
+                // had no such guard, so an exception here reached the main Looper and killed the
+                // app mid-payment instead of failing a session the user could retry.
+                try {
+                    action()
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Session callback threw", t)
+                    DiagnosticLog.logThrowable("  session callback threw", t)
+                    onAccessibilityFailure()
+                }
             } else {
                 Log.d(TAG, "Ignoring stale callback from session $expectedSession (current=$sessionId)")
             }
         }, delayMs)
     }
 
-    fun startCommand(context: Context, command: UssdCommand) {
+    suspend fun startCommand(context: Context, command: UssdCommand) {
         appContext = context.applicationContext
+        DiagnosticLog.log("startCommand type=${command.type}")
 
         // Prevent concurrent sessions
         if (isRunning) {
             Log.w(TAG, "startCommand called while session is already running — ignoring")
+            DiagnosticLog.log("  refused: session already running")
             return
         }
 
         if (!hasRequiredPermissions(context)) {
+            DiagnosticLog.log("  refused: missing phone permissions")
             _state.value = UssdState.Failed("Phone call & read phone state permissions required", canRetry = true)
             return
         }
 
         if (!isAccessibilityEnabled(context)) {
+            DiagnosticLog.log("  refused: accessibility not enabled")
             _state.value = UssdState.Failed(
                 "Accessibility service not enabled. Please enable it in Settings.",
                 canRetry = true
@@ -295,10 +453,35 @@ object UssdManager {
         }
 
         if (!hasCellularConnectivity(context)) {
+            DiagnosticLog.log("  refused: no cellular")
             _state.value = UssdState.Failed(
                 "No mobile network. USSD requires cellular connectivity.",
                 canRetry = true
             )
+            return
+        }
+
+        // Validate the payload at this boundary — the single point every screen funnels through.
+        // Doing it only in the overlay/screen left the QR-scan and deep-link paths unchecked, and
+        // an out-of-range amount is rejected by the bank *after* the PIN has been entered.
+        validateCommand(command)?.let { reason ->
+            _state.value = UssdState.Failed(reason, canRetry = true)
+            return
+        }
+
+        // Read prefs BEFORE claiming the session. These are suspending, and setting isRunning
+        // first meant a cancelled caller (screen closed mid-read) left isRunning stuck true,
+        // locking out every future payment until the process died.
+        val prefs = (context.applicationContext as? OfflineUpiApp)?.preferences
+        val slot = try { prefs?.simSlot?.first() ?: 0 } catch (_: Exception) { 0 }
+        val biometric = try { prefs?.biometricEnabled?.first() ?: false } catch (_: Exception) { false }
+        val hasPin = if (biometric) {
+            try { prefs?.hasEncryptedUpiPin() ?: false } catch (_: Exception) { false }
+        } else false
+
+        // Re-check: another caller may have claimed the session while we were suspended.
+        if (isRunning) {
+            Log.w(TAG, "Session claimed while loading preferences — ignoring")
             return
         }
 
@@ -312,28 +495,23 @@ object UssdManager {
         cancelRequested = false
         lastSubmittedAmount = ""
         lastSubmittedNote = ""
+        clearPendingPin()
+        simSlot = slot
+        cachedBiometricEnabled = biometric
+        cachedHasStoredPin = hasPin
         // Only reset wrong PIN counter at the start of a fresh command (not retries)
         if (_state.value is UssdState.Idle || _state.value is UssdState.Failed || _state.value is UssdState.Success) {
             wrongPinAttempts = 0
         }
         messageQueue = buildMessageQueue(command)
+        // Last statement before the (non-suspending) dial: no suspension point can now strand it.
         isRunning = true
+        sessionOwner++
 
-        // Load saved SIM slot
-        simSlot = try {
-            val prefs = (context.applicationContext as? OfflineUpiApp)?.preferences
-            kotlinx.coroutines.runBlocking { prefs?.simSlot?.first() } ?: 0
-        } catch (_: Exception) { 0 }
-
-        val description = when (command.type) {
-            UssdCommandType.SEND_MONEY -> "Sending ₹${command.amount} to ${command.recipientId}..."
-            UssdCommandType.REQUEST_MONEY -> if (command.amount.isNotEmpty()) "Requesting ₹${command.amount} from ${command.recipientId}..." else "Verifying ${command.recipientId}..."
-            UssdCommandType.CHECK_BALANCE -> "Checking balance..."
-            UssdCommandType.MY_PROFILE -> "Fetching profile..."
-        }
         _state.value = UssdState.Dialing
         OverlayManager.showProgress("Processing...", "Please wait")
 
+        DiagnosticLog.log("  session claimed, dialing; serviceBound=${UssdAccessibilityService.getInstance() != null}")
         val ussdCode = getUssdCode(command)
         Log.d(TAG, "Starting USSD: command=${command.type}, code=$ussdCode, queue=$messageQueue, sim=$simSlot")
         dialUssd(context, ussdCode, simSlot)
@@ -504,7 +682,8 @@ object UssdManager {
                 val refId = extractReferenceId(responseText)
                 // Always try to extract payee name from success text (may be more accurate)
                 verifiedPayeeName = extractPayeeName(responseText) ?: verifiedPayeeName
-                val isBalance = isBalanceResponse(responseText)
+                val isBalance = command.type == UssdCommandType.CHECK_BALANCE &&
+                    isBalanceResponse(responseText)
                 _state.value = UssdState.Success(responseText.take(200), refId, verifiedPayeeName)
                 OverlayManager.updateStatus(
                     if (isBalance) "Balance retrieved!" else "Payment successful!",
@@ -556,7 +735,11 @@ object UssdManager {
                     UssdAccessibilityService.setWaitingForSend(true)
                     postSessionDelayed(800) {
                         Log.d(TAG, "Auto-sending pending PIN")
-                        UssdAccessibilityService.send(pin)
+                        try {
+                            UssdAccessibilityService.send(CharArrayCharSequence(pin))
+                        } finally {
+                            pin.fill(' ')
+                        }
                     }
                     scheduleTimeout(STEP_TIMEOUT_MS, "PIN verification timed out")
                     return
@@ -678,6 +861,11 @@ object UssdManager {
         val lower = responseText.lowercase()
         if (lower.contains("welcome") || lower.contains("running") || responseText.isBlank()) {
             Log.d(TAG, "Ignoring informational/blank final response")
+            // The newSession() above cancelled the pending timeout. Returning without re-arming
+            // left the session with no watchdog at all: if the bank sent a "please wait" dialog and
+            // then nothing, the spinner stayed up forever and the only way out was force-stopping
+            // the app. Re-arm the step timeout so a stalled session still fails cleanly.
+            scheduleTimeout(STEP_TIMEOUT_MS, "USSD response timed out")
             return
         }
 
@@ -754,8 +942,20 @@ object UssdManager {
 
         // Default: treat unrecognized final response as failure, not success.
         // Unknown USSD responses should not silently appear as successful transactions.
-        Log.w(TAG, "Unrecognized final response, treating as failure: $responseText")
-        failSession(responseText.take(200).ifBlank { "Unexpected USSD response" })
+        //
+        // The response text itself is deliberately not logged: Log.w survives R8 into release
+        // builds (only v/d are stripped), and bank USSD text can carry account fragments and
+        // balances. The length is all that is useful for spotting a classifier gap.
+        //
+        // It is carried on the Failed state instead, so the failure screen can show the user the
+        // exact text and offer to share it. That is the only route by which an unclassified bank
+        // wording can reach the pattern lists in UssdResponseClassifier: it never leaves the
+        // device unless the user reads it and picks a destination themselves.
+        Log.w(TAG, "Unrecognized final response (${responseText.length} chars), treating as failure")
+        failSession(
+            responseText.take(200).ifBlank { "Unexpected USSD response" },
+            unrecognizedResponse = responseText.take(500).takeIf { it.isNotBlank() }
+        )
     }
 
     /**
@@ -766,11 +966,9 @@ object UssdManager {
         val ctx = appContext ?: return false
         val app = ctx as? OfflineUpiApp ?: return false
 
-        val biometricEnabled = try {
-            kotlinx.coroutines.runBlocking { app.preferences.biometricEnabled.first() }
-        } catch (_: Exception) { false }
-
-        if (!biometricEnabled || !app.preferences.hasEncryptedUpiPin()) {
+        // Both reads are cached at startCommand(): the PIN-presence check is a suspend DataStore
+        // read and this runs inside a non-suspend accessibility callback.
+        if (!cachedBiometricEnabled || !cachedHasStoredPin) {
             return false
         }
 
@@ -778,50 +976,66 @@ object UssdManager {
         _state.value = UssdState.Processing("Authenticating...", 0.9f)
         OverlayManager.showProgress("Waiting for biometric...", "Authenticate to authorize payment")
 
-        BiometricAuthActivity.onBiometricSuccess = {
-            Log.d(TAG, "Biometric auth succeeded, auto-filling PIN")
-            val storedPin = app.preferences.getEncryptedUpiPin()
-            if (storedPin != null) {
-                sendPinResponse(storedPin)
-            } else {
-                Log.w(TAG, "Stored PIN is null after biometric success")
-                // Fall back to manual PIN entry
-                _state.value = UssdState.WaitingForPin("Enter UPI PIN")
-                OverlayManager.showPinEntry(
-                    "Enter UPI PIN",
-                    payeeName = verifiedPayeeName ?: currentCommand?.recipientId,
-                    amount = lastSubmittedAmount.ifEmpty { currentCommand?.amount }.takeIf { !it.isNullOrEmpty() }
-                )
-            }
-        }
-        BiometricAuthActivity.onBiometricError = { msg ->
-            Log.d(TAG, "Biometric auth failed: $msg — falling back to manual PIN entry")
-            // Fall back to manual PIN entry
-            _state.value = UssdState.WaitingForPin("Enter UPI PIN")
-            OverlayManager.showPinEntry(
-                "Enter UPI PIN",
-                payeeName = verifiedPayeeName ?: currentCommand?.recipientId,
-                amount = lastSubmittedAmount.ifEmpty { currentCommand?.amount }.takeIf { !it.isNullOrEmpty() }
-            )
-        }
-
+        var intent: Intent? = null
         try {
-            val intent = android.content.Intent(ctx, BiometricAuthActivity::class.java).apply {
-                flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
-                        android.content.Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
-            }
+            intent = BiometricAuthActivity.createIntent(
+                context = ctx,
+                onSuccess = {
+                    Log.d(TAG, "Biometric auth succeeded, reading stored PIN")
+                    // The PIN store is auth-bound: this read only succeeds because the prompt
+                    // above just authenticated the user, and it must happen inside the Keystore's
+                    // validity window (SecurePrefs.AUTH_VALIDITY_SECONDS), hence no delay here.
+                    scope.launch {
+                        val storedPin = app.preferences.getEncryptedUpiPin()
+                        if (storedPin != null) {
+                            sendPinResponse(storedPin)
+                        } else {
+                            // Either no PIN, or the Keystore refused (biometrics re-enrolled, or
+                            // the auth window already elapsed). Indistinguishable, and manual
+                            // entry is the right answer for both.
+                            Log.w(TAG, "Stored PIN unavailable after biometric success")
+                            promptManualPin()
+                        }
+                    }
+                },
+                onError = { msg ->
+                    Log.d(TAG, "Biometric auth failed: $msg — falling back to manual PIN entry")
+                    promptManualPin()
+                }
+            )
             ctx.startActivity(intent)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to launch BiometricAuthActivity", e)
-            BiometricAuthActivity.onBiometricSuccess = null
-            BiometricAuthActivity.onBiometricError = null
+            // createIntent already parked the callbacks in a process-lifetime map keyed by the
+            // intent's token. Nothing will ever consume them now, so drop the entry instead of
+            // leaking it — and the pair captures this whole session's continuation.
+            intent?.let { BiometricAuthActivity.discardRequest(it) }
             return false
         }
 
         return true
     }
 
-    fun sendPinResponse(pin: String) {
+    /** Shows the overlay PIN pad for the current command. */
+    private fun promptManualPin() {
+        _state.value = UssdState.WaitingForPin("Enter UPI PIN")
+        OverlayManager.showPinEntry(
+            "Enter UPI PIN",
+            payeeName = verifiedPayeeName ?: currentCommand?.recipientId,
+            amount = lastSubmittedAmount.ifEmpty { currentCommand?.amount }
+                .takeIf { !it.isNullOrEmpty() }
+        )
+    }
+
+    /**
+     * Submits a UPI PIN to the USSD dialog.
+     *
+     * Takes ownership of [pin]: the array is wiped once it has been handed to the accessibility
+     * service (or stored as [pendingPin] for a post-wrong-PIN re-dial), so callers must not reuse
+     * it. It is a [CharArray] rather than a `String` so the PIN can actually be erased — see
+     * [CharArrayCharSequence].
+     */
+    fun sendPinResponse(pin: CharArray) {
         Log.d(TAG, "Sending PIN response (wrongPinAttempts=$wrongPinAttempts)")
         pinSubmitted = true
         _state.value = UssdState.Processing("Processing...", 0.9f)
@@ -830,6 +1044,7 @@ object UssdManager {
         if (wrongPinAttempts > 0) {
             // After a wrong PIN, the USSD session is dead. We need to re-dial
             // the entire flow and auto-submit the PIN when the prompt appears.
+            clearPendingPin()
             pendingPin = pin
             val ctx = appContext
             val cmd = currentCommand
@@ -849,10 +1064,27 @@ object UssdManager {
             }
         } else {
             postSessionDelayed(300) {
-                UssdAccessibilityService.send(pin)
+                try {
+                    UssdAccessibilityService.send(CharArrayCharSequence(pin))
+                } finally {
+                    pin.fill(' ')
+                }
             }
             scheduleTimeout(STEP_TIMEOUT_MS, "PIN verification timed out")
         }
+    }
+
+    /**
+     * Called by [UssdAccessibilityService] when an accessibility callback threw.
+     *
+     * The screen-scraping state machine cannot recover from an unknown node-tree failure
+     * mid-session — the phone dialog may or may not still be up — so the session is failed with a
+     * retryable message rather than left waiting on a timeout that may never fire.
+     */
+    fun onAccessibilityFailure() {
+        if (!isRunning) return
+        Log.w(TAG, "Accessibility failure while a session was active — failing the session")
+        failSession("Something went wrong reading the USSD dialog. Please try again.")
     }
 
     /**
@@ -865,11 +1097,28 @@ object UssdManager {
             Log.w(TAG, "continueSession called but not in WaitingForInput state")
             return
         }
+        // The amount collected by the overlay reaches the bank through here, so it is validated
+        // here too — the overlay's own field check is a convenience, not the boundary.
+        if (messages.isNotEmpty()) {
+            Validators.amountError(messages[0])?.let { reason ->
+                Log.w(TAG, "Rejecting continueSession amount: $reason")
+                OverlayManager.showAmountError(reason)
+                return
+            }
+        }
         // Store submitted amount/note for ViewModel to read
         if (messages.isNotEmpty()) lastSubmittedAmount = messages[0]
         if (messages.size > 1) lastSubmittedNote = messages[1]
-        Log.d(TAG, "Continuing session with ${messages.size} messages: ${messages.toList()}")
+        Log.d(TAG, "Continuing session with ${messages.size} messages")
         messageQueue = messageQueue + messages.toList()
+        // Bounds guard: currentStep is advanced from accessibility callbacks, and a duplicate
+        // dialog event could push it past the queue. An IndexOutOfBoundsException thrown from
+        // inside an a11y callback takes the whole service down with it.
+        if (currentStep !in messageQueue.indices) {
+            Log.w(TAG, "continueSession: step $currentStep outside queue (${messageQueue.size})")
+            failSession("Lost track of the USSD session. Please try again.")
+            return
+        }
         val nextMessage = messageQueue[currentStep]
         currentStep++
 
@@ -968,33 +1217,16 @@ object UssdManager {
         return isRunning && currentStep <= messageQueue.size
     }
 
-    private fun isErrorResponse(text: String): Boolean {
-        val lower = text.lowercase()
-        // Don't treat wrong PIN as a generic error — it has its own handler
-        if (isWrongPinResponse(text)) return false
-        return lower.contains("error") ||
-            lower.contains("failed") ||
-            lower.contains("invalid") ||
-            lower.contains("unable to process") ||
-            lower.contains("try again later") ||
-            lower.contains("service unavailable") ||
-            lower.contains("not registered") ||
-            lower.contains("transaction declined") ||
-            lower.contains("problem") ||
-            lower.contains("connection problem")
-    }
+    // ---- Response classification -------------------------------------------------------------
+    // The pattern lists and the pure predicates live in UssdResponseClassifier so they can be
+    // unit-tested without this object's Looper/Dispatchers.Main initialisers. These wrappers keep
+    // the call sites below unchanged.
 
-    private fun isWrongPinResponse(text: String): Boolean {
-        val lower = text.lowercase()
-        return lower.contains("incorrect pin") ||
-            lower.contains("wrong pin") ||
-            lower.contains("invalid pin") ||
-            lower.contains("incorrect upi pin") ||
-            lower.contains("wrong upi pin") ||
-            lower.contains("pin is incorrect") ||
-            lower.contains("pin is wrong") ||
-            (lower.contains("incorrect") && lower.contains("pin"))
-    }
+    internal fun isErrorResponse(text: String): Boolean =
+        UssdResponseClassifier.isErrorResponse(text)
+
+    internal fun isWrongPinResponse(text: String): Boolean =
+        UssdResponseClassifier.isWrongPinResponse(text)
 
     private fun handleWrongPin(responseText: String) {
         wrongPinAttempts++
@@ -1031,60 +1263,24 @@ object UssdManager {
         )
     }
 
-    private fun isSuccessResponse(text: String): Boolean {
-        val lower = text.lowercase()
-        return lower.contains("successful") ||
-            lower.contains("success") ||
-            lower.contains("completed") ||
-            lower.contains("txn id") ||
-            lower.contains("transaction id") ||
-            lower.contains("reference no") ||
-            lower.contains("has been sent") ||
-            lower.contains("has been credited") ||
-            lower.contains("has been debited") ||
-            isBalanceResponse(text)
-    }
+    /** Classifies against the command currently in flight. */
+    internal fun isSuccessResponse(text: String): Boolean =
+        UssdResponseClassifier.isSuccessResponse(text, currentCommand?.type)
 
-    private fun isBalanceResponse(text: String): Boolean {
-        val lower = text.lowercase()
-        return (lower.contains("balance") && (lower.contains("rs") || lower.contains("inr") || lower.contains("₹"))) ||
-            lower.contains("your account balance") ||
-            lower.contains("available balance") ||
-            lower.contains("a/c bal")
-    }
+    internal fun isSuccessResponse(text: String, commandType: UssdCommandType?): Boolean =
+        UssdResponseClassifier.isSuccessResponse(text, commandType)
 
-    private fun isPinPrompt(text: String): Boolean {
-        val lower = text.lowercase()
-        return lower.contains("enter pin") ||
-            lower.contains("upi pin") ||
-            lower.contains("mpin") ||
-            lower.contains("enter your pin") ||
-            lower.contains("transaction pin") ||
-            lower.contains("enter upi pin")
-    }
+    internal fun isBalanceResponse(text: String): Boolean =
+        UssdResponseClassifier.isBalanceResponse(text)
 
-    /**
-     * Detect USSD session expiry responses like "error-code\n1" or "error code 1".
-     * These appear when the USSD menu times out (~60s of inactivity).
-     */
-    private fun isSessionExpiredResponse(text: String): Boolean {
-        val lower = text.lowercase().trim()
-        return lower.startsWith("error-code") || lower.startsWith("error code")
-    }
+    private fun isPinPrompt(text: String): Boolean =
+        UssdResponseClassifier.isPinPrompt(text)
 
-    private fun extractReferenceId(text: String): String? {
-        val patterns = listOf(
-            Regex("(?i)txn\\s*id[:\\s]*([A-Za-z0-9]+)"),
-            Regex("(?i)ref\\s*id[:\\s]*([A-Za-z0-9]+)"),
-            Regex("(?i)ref[erence]*\\s*no[:\\s]*([A-Za-z0-9]+)"),
-            Regex("(?i)reference[:\\s]*([A-Za-z0-9]+)")
-        )
-        for (pattern in patterns) {
-            val match = pattern.find(text)
-            if (match != null) return match.groupValues[1]
-        }
-        return null
-    }
+    private fun isSessionExpiredResponse(text: String): Boolean =
+        UssdResponseClassifier.isSessionExpiredResponse(text)
+
+    private fun extractReferenceId(text: String): String? =
+        UssdResponseClassifier.extractReferenceId(text)
 
     /**
      * Extract the bank-verified payee name from USSD response text.

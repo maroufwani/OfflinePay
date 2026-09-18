@@ -1,6 +1,12 @@
-<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?><!--
+    typeWindowContentChanged is deliberately NOT subscribed to. The service returns immediately on
+    that event type (UssdAccessibilityService.handleEvent), but with notificationTimeout="0" the
+    system was still delivering the whole high-frequency stream — every text change inside the
+    phone dialog — across a binder call, only to have it dropped on arrival. A new USSD dialog
+    always arrives as typeWindowStateChanged, which is the only event this flow acts on.
+-->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityEventTypes="typeWindowStateChanged"
     android:packageNames="com.android.phone"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows"

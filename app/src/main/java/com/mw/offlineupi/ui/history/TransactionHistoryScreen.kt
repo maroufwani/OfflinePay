@@ -30,6 +30,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -42,11 +43,9 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.mw.offlineupi.data.local.entity.TransactionEntity
 import com.mw.offlineupi.ui.components.AppTopBar
 import com.mw.offlineupi.ui.theme.Success
+import com.mw.offlineupi.util.DateFormats
 import com.mw.offlineupi.util.Validators
-import java.text.SimpleDateFormat
 import java.util.Calendar
-import java.util.Date
-import java.util.Locale
 
 @Composable
 fun TransactionHistoryScreen(
@@ -56,7 +55,10 @@ fun TransactionHistoryScreen(
 ) {
     val searchQuery by viewModel.searchQuery.collectAsState()
     val transactions by viewModel.transactions.collectAsState(initial = emptyList())
-    val grouped = groupTransactionsByDate(transactions)
+    // Keyed on the list: grouping walks every transaction and formats a date per distinct day,
+    // and it used to re-run on every recomposition of the screen — including every keystroke in
+    // the search field, which recomposes this body while the list itself is unchanged.
+    val grouped = remember(transactions) { groupTransactionsByDate(transactions) }
 
     Scaffold(
         topBar = { AppTopBar(title = "Transaction History", onBack = onBack) }
@@ -159,8 +161,7 @@ private fun HistoryItem(transaction: TransactionEntity, onClick: () -> Unit = {}
     val isFailed = transaction.status == "FAILED"
     val isSend = transaction.type == "SEND"
     val initial = transaction.recipientName.firstOrNull()?.uppercase() ?: "?"
-    val timeFormat = SimpleDateFormat("hh:mm a", Locale.getDefault())
-    val timeText = timeFormat.format(Date(transaction.timestamp))
+    val timeText = DateFormats.time(transaction.timestamp)
 
     val avatarColors = listOf(
         Color(0xFF5C6BC0) to Color(0xFFE8EAF6),
@@ -272,13 +273,12 @@ private fun groupTransactionsByDate(transactions: List<TransactionEntity>): List
         set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
     }.timeInMillis
     val yesterdayStart = todayStart - 86_400_000L
-    val dateFormat = SimpleDateFormat("dd MMM yyyy", Locale.getDefault())
 
     return transactions.groupBy { txn ->
         when {
             txn.timestamp >= todayStart -> "Today"
             txn.timestamp >= yesterdayStart -> "Yesterday"
-            else -> dateFormat.format(Date(txn.timestamp))
+            else -> DateFormats.dayMonthYear(txn.timestamp)
         }
     }.toList()
 }

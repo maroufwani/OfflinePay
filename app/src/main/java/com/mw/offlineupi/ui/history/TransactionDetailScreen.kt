@@ -50,9 +50,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.mw.offlineupi.ui.components.AppTopBar
 import com.mw.offlineupi.ui.components.PrimaryButton
 import com.mw.offlineupi.ui.components.SuccessScreen
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import com.mw.offlineupi.util.DateFormats
 
 @Composable
 fun TransactionDetailScreen(
@@ -87,8 +85,7 @@ fun TransactionDetailScreen(
         var visible by remember { mutableStateOf(false) }
         LaunchedEffect(Unit) { visible = true }
 
-        val dateFormat = SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault())
-        val formattedDate = dateFormat.format(Date(txn.timestamp))
+        val formattedDate = DateFormats.full(txn.timestamp)
         val isSuccess = txn.status == "SUCCESS"
         val isFailed = txn.status == "FAILED"
 

@@ -57,13 +57,12 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     fun fetchProfile() {
         _state.value = _state.value.copy(profileFetching = true, profileError = null)
 
-        // Save SIM slot first so UssdManager uses the right SIM
-        viewModelScope.launch {
-            app.preferences.setSimSlot(_state.value.selectedSim)
-        }
-
         val command = UssdCommand(type = UssdCommandType.MY_PROFILE)
-        UssdManager.startCommand(app, command)
+        viewModelScope.launch {
+            // Save SIM slot first so UssdManager reads the updated value
+            app.preferences.setSimSlot(_state.value.selectedSim)
+            UssdManager.startCommand(app, command)
+        }
 
         // Observe UssdManager state for the result
         viewModelScope.launch {

@@ -27,9 +27,18 @@ class RequestMoneyViewModel(application: Application) : AndroidViewModel(applica
     private var lastTransactionId: Long = -1
     private var wasWaitingForInput = false
 
+    /**
+     * Token of the USSD session this ViewModel started, or -1 when it has none in flight.
+     * Every payment screen collects the same global [UssdManager.state], so terminal states are
+     * only acted on by the ViewModel that owns the session — otherwise two live ViewModels each
+     * wrote their own history row for one request.
+     */
+    private var sessionToken: Long = -1
+
     init {
         viewModelScope.launch {
             UssdManager.state.collect { ussd ->
+                if (sessionToken < 0 || !UssdManager.ownsSession(sessionToken)) return@collect
                 when (ussd) {
                     is UssdState.WaitingForInput -> {
                         wasWaitingForInput = true
@@ -101,18 +110,21 @@ class RequestMoneyViewModel(application: Application) : AndroidViewModel(applica
             return
         }
         _state.value = current.copy(error = null)
-        UssdManager.startCommand(
-            app,
-            UssdCommand(
-                type = UssdCommandType.REQUEST_MONEY,
-                recipientId = current.recipientId,
-                amount = "",
-                note = ""
+        viewModelScope.launch {
+            UssdManager.startCommand(
+                app,
+                UssdCommand(
+                    type = UssdCommandType.REQUEST_MONEY,
+                    recipientId = current.recipientId,
+                    amount = "",
+                    note = ""
+                )
             )
-        )
+            sessionToken = UssdManager.currentSessionOwner
+        }
     }
 
-    fun sendPin(pin: String) {
+    fun sendPin(pin: CharArray) {
         UssdManager.sendPinResponse(pin)
     }
 
@@ -120,6 +132,7 @@ class RequestMoneyViewModel(application: Application) : AndroidViewModel(applica
         _state.value = RequestMoneyState()
         lastTransactionId = -1
         wasWaitingForInput = false
+        sessionToken = -1
         UssdManager.reset()
     }
 }

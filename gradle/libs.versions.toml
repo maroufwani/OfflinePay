@@ -9,9 +9,16 @@ activityCompose = "1.10.1"
 navigationCompose = "2.9.0"
 room = "2.7.1"
 datastore = "1.1.4"
-camerax = "1.4.1"
+camerax = "1.5.0"
 mlkitBarcode = "17.3.0"
+# Stays on the 1.1.0 stable line. Everything the API-level split in SecurityUtil needs
+# (Authenticators, setAllowedAuthenticators, setDeviceCredentialAllowed, ERROR_CANCELED) is
+# already there, and every newer published build is an alpha — not a trade worth making on the
+# code path that authorises payments.
 biometric = "1.1.0"
+# 1.1.0-alpha06, not 1.0.0: the MasterKey.Builder API (needed for the auth-bound key in
+# SecurePrefs) does not exist in 1.0.0, which only ships the deprecated MasterKeys helper.
+# This is the newest published build of security-crypto; there is no stable 1.1.0.
 securityCrypto = "1.1.0-alpha06"
 sqlcipher = "4.6.1"
 junit = "4.13.2"
@@ -73,7 +80,6 @@ androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-co
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
-kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 

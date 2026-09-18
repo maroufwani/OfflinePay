@@ -55,9 +55,8 @@ import com.mw.offlineupi.ui.components.PinEntryCard
 import com.mw.offlineupi.ui.components.PrimaryButton
 import com.mw.offlineupi.ui.components.UssdProgressIndicator
 import com.mw.offlineupi.ui.components.rememberUssdPermissionLauncher
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import com.mw.offlineupi.util.BalanceParser
+import com.mw.offlineupi.util.DateFormats
 
 @Composable
 fun BalanceCheckScreen(
@@ -115,6 +114,7 @@ fun BalanceCheckScreen(
                     val f = ussdState as UssdState.Failed
                     FailureScreen(
                         reason = f.reason,
+                        unrecognizedResponse = f.unrecognizedResponse,
                         onRetry = { viewModel.reset() },
                         title = "Balance Check Failed"
                     )
@@ -210,7 +210,7 @@ fun BalanceCheckScreen(
                     Spacer(modifier = Modifier.height(24.dp))
 
                     if (lastBalance.isNotEmpty()) {
-                        val parsedAmount = remember(lastBalance) { extractBalanceAmount(lastBalance) }
+                        val parsedAmount = remember(lastBalance) { BalanceParser.extractAmount(lastBalance) }
 
                         Card(
                             modifier = Modifier.fillMaxWidth(),
@@ -269,8 +269,12 @@ fun BalanceCheckScreen(
                                             )
                                         }
                                     } else {
+                                        // Only reachable for a value written by a build that
+                                        // stored the bank's whole USSD reply and could not be
+                                        // reduced to a number on load. The response text itself is
+                                        // deliberately not shown here.
                                         Text(
-                                            lastBalance,
+                                            "—",
                                             style = MaterialTheme.typography.headlineSmall,
                                             fontWeight = FontWeight.Bold,
                                             color = MaterialTheme.colorScheme.onSurface,
@@ -288,11 +292,8 @@ fun BalanceCheckScreen(
 
                                 if (lastBalanceTime > 0) {
                                     Spacer(modifier = Modifier.height(12.dp))
-                                    val dateFormat = SimpleDateFormat(
-                                        "dd MMM yyyy, hh:mm a", Locale.getDefault()
-                                    )
                                     Text(
-                                        "Updated: ${dateFormat.format(Date(lastBalanceTime))}",
+                                        "Updated: ${DateFormats.full(lastBalanceTime)}",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                                     )
@@ -312,20 +313,6 @@ fun BalanceCheckScreen(
     }
 }
 
-private fun extractBalanceAmount(rawMessage: String): String? {
-    // Match patterns like "Rs.1549.40", "Rs 1,549.40", "INR 1549.40", "₹1549.40"
-    val patterns = listOf(
-        Regex("(?i)Rs\\.?\\s*([\\d,]+\\.?\\d*)"),
-        Regex("(?i)INR\\.?\\s*([\\d,]+\\.?\\d*)"),
-        Regex("₹\\s*([\\d,]+\\.?\\d*)")
-    )
-    for (pattern in patterns) {
-        val match = pattern.find(rawMessage)
-        if (match != null) return match.groupValues[1].replace(",", "")
-    }
-    return null
-}
-
 @Composable
 private fun BalanceSuccessContent(
     rawMessage: String,
@@ -334,10 +321,8 @@ private fun BalanceSuccessContent(
     var visible by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { visible = true }
 
-    val balanceAmount = remember(rawMessage) { extractBalanceAmount(rawMessage) }
-    val dateTime = remember {
-        SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault()).format(Date())
-    }
+    val balanceAmount = remember(rawMessage) { BalanceParser.extractAmount(rawMessage) }
+    val dateTime = remember { DateFormats.full(System.currentTimeMillis()) }
 
     Column(
         modifier = Modifier

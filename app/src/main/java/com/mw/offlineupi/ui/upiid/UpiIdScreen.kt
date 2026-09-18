@@ -113,6 +113,7 @@ fun UpiIdScreen(
                     val f = ussdState as UssdState.Failed
                     FailureScreen(
                         reason = f.reason,
+                        unrecognizedResponse = f.unrecognizedResponse,
                         onRetry = { viewModel.reset() }
                     )
                 }

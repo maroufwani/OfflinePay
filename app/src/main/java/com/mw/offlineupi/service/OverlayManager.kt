@@ -15,12 +15,14 @@ import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
+import com.mw.offlineupi.util.DiagnosticLog
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
+import com.mw.offlineupi.util.Validators
 
 /**
  * Manages a full-screen overlay using TYPE_ACCESSIBILITY_OVERLAY from the AccessibilityService.
@@ -53,6 +55,8 @@ object OverlayManager {
     private var pinCountdownRemainingMs: Long = 60_000L
     private var pinPayeeName: String? = null
     private var pinAmount: String? = null
+    /** Error label of the live amount screen, so a late rejection can be shown on it. */
+    private var amountErrorText: TextView? = null
     private var currentWrongAttempts: Int = 0
     private var currentMaxAttempts: Int = 3
     private val handler = Handler(Looper.getMainLooper())
@@ -130,6 +134,7 @@ object OverlayManager {
             pinCountdownTimer = null
             val svc = UssdAccessibilityService.getInstance() ?: run {
                 Log.w(TAG, "No accessibility service instance for overlay")
+                DiagnosticLog.log("overlay SKIPPED: accessibility service not bound")
                 return@post
             }
             currentStatus = status
@@ -205,6 +210,22 @@ object OverlayManager {
         }
     }
 
+    /**
+     * Re-shows the amount screen with [reason] displayed.
+     *
+     * The Continue button switches to the progress view before handing the amount to
+     * [UssdManager.continueSession], so when that call rejects the amount there is no longer an
+     * amount screen to put the message on. Rebuilding it (keeping the countdown where it was) is
+     * simpler than deferring the progress switch, and it also covers a rejection arriving from any
+     * other caller.
+     */
+    fun showAmountError(reason: String) {
+        handler.post {
+            showAmountEntry(amountVerifiedName, amountMessage, resetTimer = false)
+            handler.post { amountErrorText?.text = reason }
+        }
+    }
+
     fun updateStatus(status: String, step: String = "") {
         handler.post {
             currentStatus = status
@@ -232,8 +253,22 @@ object OverlayManager {
             }
             isPinMode = false
             isAmountMode = false
+            amountErrorText = null
             Log.d(TAG, "Overlay hidden")
         }
+    }
+
+    /**
+     * Rejects edits that would leave more than [max] digits after the decimal point.
+     *
+     * `TYPE_NUMBER_FLAG_DECIMAL` permits any number of decimals, so "10.567" was typeable and the
+     * `*99#` flow silently truncated it — the user authorised one amount and the bank moved
+     * another. Filtering at the field means the number on screen is the number that is sent.
+     */
+    private fun decimalPlacesFilter(max: Int) = InputFilter { source, start, end, dest, dstart, dend ->
+        val result = StringBuilder(dest).replace(dstart, dend, source.subSequence(start, end).toString())
+        val dot = result.indexOf(".")
+        if (dot >= 0 && result.length - dot - 1 > max) "" else null
     }
 
     private fun collapse() {
@@ -294,6 +329,14 @@ object OverlayManager {
         miniView = null
     }
 
+    /**
+     * `FLAG_SECURE` on every overlay window.
+     *
+     * The overlay carries the PIN pad, the amount, and the verified payee name. Without this flag
+     * all of it lands in screenshots, in the recents thumbnail, and in any screen-recording or
+     * casting session — including ones started by another app. The flag costs nothing here because
+     * nothing legitimately needs to capture this surface.
+     */
     private fun createLayoutParams(): WindowManager.LayoutParams {
         return WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -301,7 +344,8 @@ object OverlayManager {
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                    WindowManager.LayoutParams.FLAG_SECURE,
             PixelFormat.TRANSLUCENT
         )
     }
@@ -313,7 +357,8 @@ object OverlayManager {
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_SECURE,
             PixelFormat.TRANSLUCENT
         ).apply {
             softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
@@ -516,23 +561,30 @@ object OverlayManager {
         }
         content.addView(pinTimerText)
 
+        // Assigned once the numpad and action buttons below have been built. The timer has to be
+        // started here because the countdown label sits above them in the layout order.
+        var lockPinInput: (() -> Unit)? = null
+
         pinCountdownTimer?.cancel()
         pinCountdownTimer = object : CountDownTimer(pinCountdownRemainingMs, 1_000L) {
+            // No handler.post inside these callbacks: CountDownTimer delivers them on the Looper of
+            // the thread that constructed it, and this view is only ever built from the handler.post
+            // in showPinEntry — so we are already on the main thread.
             override fun onTick(millisUntilFinished: Long) {
                 pinCountdownRemainingMs = millisUntilFinished
                 val secs = (millisUntilFinished / 1000).toInt()
-                handler.post {
-                    pinTimerText.text = "Session expires in ${secs}s"
-                    if (secs <= 10) {
-                        pinTimerText.setTextColor(t.error)
-                    }
+                pinTimerText.text = "Session expires in ${secs}s"
+                if (secs <= 10) {
+                    pinTimerText.setTextColor(t.error)
                 }
             }
             override fun onFinish() {
-                handler.post {
-                    pinTimerText.text = "Session expired"
-                    pinTimerText.setTextColor(t.error)
-                }
+                pinTimerText.text = "Session expired"
+                pinTimerText.setTextColor(t.error)
+                // The USSD session is gone, so the keypad has to go dead with it. It previously
+                // stayed live and a PIN typed after expiry was still submitted — into a session the
+                // network had already torn down, which some banks count as a failed PIN attempt.
+                lockPinInput?.invoke()
             }
         }.start()
 
@@ -615,8 +667,14 @@ object OverlayManager {
             content.addView(errorBanner)
         }
 
-        // PIN dots display
-        var currentPin = ""
+        // PIN buffer.
+        //
+        // A fixed CharArray rather than a String: `currentPin += key` allocated a fresh immutable
+        // String per keystroke, so a 6-digit PIN left six partial copies on the heap that could
+        // not be wiped and survived until GC chose to collect them. The array is wiped in
+        // [clearPinBuffer] as soon as the PIN is handed over, on cancel, and on teardown.
+        val pinBuffer = CharArray(6)
+        var pinLength = 0
         val pinDotsContainer = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -652,7 +710,7 @@ object OverlayManager {
 
         fun updateDots() {
             for (i in pinDots.indices) {
-                val filled = i < currentPin.length
+                val filled = i < pinLength
                 val gd = GradientDrawable().apply {
                     shape = GradientDrawable.OVAL
                     setColor(if (filled) t.pinDotFilled else t.pinDotEmpty)
@@ -675,6 +733,10 @@ object OverlayManager {
             listOf("7", "8", "9"),
             listOf("", "0", "⌫")
         )
+
+        /** Set by the countdown's onFinish; every input path checks it before touching the buffer. */
+        var sessionExpired = false
+        val keyButtons = mutableListOf<TextView>()
 
         for (row in keys) {
             val rowLayout = LinearLayout(context).apply {
@@ -706,23 +768,27 @@ object OverlayManager {
                         isClickable = true
                         isFocusable = true
                         setOnClickListener {
+                            if (sessionExpired) return@setOnClickListener
                             when (key) {
                                 "⌫" -> {
-                                    if (currentPin.isNotEmpty()) {
-                                        currentPin = currentPin.dropLast(1)
+                                    if (pinLength > 0) {
+                                        pinLength--
+                                        pinBuffer[pinLength] = ' '
                                         updateDots()
                                         errorText.text = ""
                                     }
                                 }
                                 else -> {
-                                    if (currentPin.length < 6) {
-                                        currentPin += key
+                                    if (pinLength < pinBuffer.size) {
+                                        pinBuffer[pinLength] = key[0]
+                                        pinLength++
                                         updateDots()
                                         errorText.text = ""
                                     }
                                 }
                             }
                         }
+                        keyButtons.add(this)
                     }
                 }
                 rowLayout.addView(btn)
@@ -752,6 +818,8 @@ object OverlayManager {
             background = gd
             setPadding(dp(context, 28), dp(context, 14), dp(context, 28), dp(context, 14))
             setOnClickListener {
+                pinBuffer.fill(' ')
+                pinLength = 0
                 UssdManager.requestCancel()
             }
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
@@ -773,12 +841,18 @@ object OverlayManager {
             background = gd
             setPadding(dp(context, 28), dp(context, 14), dp(context, 28), dp(context, 14))
             setOnClickListener {
-                if (currentPin.length < 4) {
+                if (sessionExpired) return@setOnClickListener
+                if (pinLength < 4) {
                     errorText.text = "PIN must be 4-6 digits"
                     return@setOnClickListener
                 }
+                // Hand over a right-sized copy and wipe our own buffer immediately;
+                // sendPinResponse wipes the copy once it has been dispatched.
+                val out = pinBuffer.copyOf(pinLength)
+                pinBuffer.fill(' ')
+                pinLength = 0
                 showProgress("Verifying PIN...", "Please wait")
-                UssdManager.sendPinResponse(currentPin)
+                UssdManager.sendPinResponse(out)
             }
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
                 marginStart = dp(context, 8)
@@ -787,6 +861,23 @@ object OverlayManager {
         buttonRow.addView(confirmBtn)
 
         content.addView(buttonRow)
+
+        // Now that the numpad and Confirm button exist, the countdown can disable them. Cancel stays
+        // enabled — with the session dead, dismissing the overlay is the only useful action left.
+        lockPinInput = {
+            sessionExpired = true
+            pinBuffer.fill(' ')
+            pinLength = 0
+            updateDots()
+            errorText.text = "Session expired — start the payment again"
+            keyButtons.forEach {
+                it.isClickable = false
+                it.alpha = 0.4f
+            }
+            confirmBtn.isClickable = false
+            confirmBtn.alpha = 0.4f
+        }
+
         outerWrap.addView(content, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.WRAP_CONTENT
@@ -842,23 +933,26 @@ object OverlayManager {
         }
         content.addView(timerText)
 
+        // Assigned once the fields and the Continue button below exist; see the PIN screen for why.
+        var lockAmountInput: (() -> Unit)? = null
+        var amountSessionExpired = false
+
         amountCountdownTimer?.cancel()
         amountCountdownTimer = object : CountDownTimer(amountCountdownRemainingMs, 1_000L) {
+            // Already on the main thread — CountDownTimer uses the Looper of the constructing thread,
+            // and showAmountEntry builds this view inside handler.post.
             override fun onTick(millisUntilFinished: Long) {
                 amountCountdownRemainingMs = millisUntilFinished
                 val secs = (millisUntilFinished / 1000).toInt()
-                handler.post {
-                    timerText.text = "Session expires in ${secs}s"
-                    if (secs <= 10) {
-                        timerText.setTextColor(t.error)
-                    }
+                timerText.text = "Session expires in ${secs}s"
+                if (secs <= 10) {
+                    timerText.setTextColor(t.error)
                 }
             }
             override fun onFinish() {
-                handler.post {
-                    timerText.text = "Session expired"
-                    timerText.setTextColor(t.error)
-                }
+                timerText.text = "Session expired"
+                timerText.setTextColor(t.error)
+                lockAmountInput?.invoke()
             }
         }.start()
 
@@ -912,7 +1006,9 @@ object OverlayManager {
             setTextColor(t.textPrimary)
             setHintTextColor(t.textHint)
             inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
-            filters = arrayOf(InputFilter.LengthFilter(10))
+            // 7 digits + '.' + 2 decimals is the widest string Validators.AMOUNT_REGEX accepts.
+            // The old LengthFilter(10) allowed "1234.56789", which the bank silently truncates.
+            filters = arrayOf(InputFilter.LengthFilter(10), decimalPlacesFilter(2))
             val gd = GradientDrawable().apply {
                 setColor(t.numpadButton)
                 cornerRadius = dp(context, 14).toFloat()
@@ -964,6 +1060,7 @@ object OverlayManager {
             setPadding(0, dp(context, 8), 0, dp(context, 4))
         }
         content.addView(errorText)
+        amountErrorText = errorText
 
         // Action buttons
         val buttonRow = LinearLayout(context).apply {
@@ -1009,9 +1106,13 @@ object OverlayManager {
             background = gd
             setPadding(dp(context, 28), dp(context, 14), dp(context, 28), dp(context, 14))
             setOnClickListener {
+                if (amountSessionExpired) return@setOnClickListener
                 val amount = amountInput.text.toString().trim()
-                if (amount.isEmpty() || amount == "." || (amount.toDoubleOrNull() ?: 0.0) <= 0) {
-                    errorText.text = "Enter a valid amount"
+                // Same validator the ViewModels and UssdManager use, so the message the user sees
+                // here names the real reason (below minimum, above the ₹5,000 USSD cap, too many
+                // decimals) instead of a generic "invalid".
+                Validators.amountError(amount)?.let { reason ->
+                    errorText.text = reason
                     return@setOnClickListener
                 }
                 val remarks = remarksInput.text.toString().trim()
@@ -1027,6 +1128,18 @@ object OverlayManager {
         buttonRow.addView(confirmBtn)
 
         content.addView(buttonRow)
+
+        // Same reasoning as the PIN screen: once the USSD session has timed out, an amount submitted
+        // from this screen goes nowhere, so the inputs are disabled rather than left looking live.
+        lockAmountInput = {
+            amountSessionExpired = true
+            amountInput.isEnabled = false
+            remarksInput.isEnabled = false
+            errorText.text = "Session expired — start the payment again"
+            confirmBtn.isClickable = false
+            confirmBtn.alpha = 0.4f
+        }
+
         outerWrap.addView(content, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.WRAP_CONTENT

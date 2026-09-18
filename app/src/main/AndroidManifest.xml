@@ -7,6 +7,21 @@
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+        Needed only by the in-app updater (util/ApkInstaller.kt), which downloads a release APK
+        from the project's GitHub releases and hands it to PackageInstaller. That is the whole
+        distribution model for this build: there is no store listing, so an install prompt is the
+        only way a user gets a new version.
+
+        If this app is ever submitted to Google Play, REQUEST_INSTALL_PACKAGES must be removed
+        along with the updater: Play's Device and Network Abuse policy restricts it to genuine
+        app-store/file-manager use cases, and a self-updating app is an explicit violation
+        (Play delivers the update instead). The updater is self-contained precisely so that this
+        is a matter of deleting ApkInstaller, ApkInstallReceiver, UpdateChecker and this line.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <application
@@ -16,7 +31,8 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.OfflineUPI">
+        android:theme="@style/Theme.OfflineUPI"
+        android:enableOnBackInvokedCallback="true">
 
         <activity
             android:name=".MainActivity"
@@ -34,6 +50,14 @@
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
             android:excludeFromRecents="true"
             android:noHistory="true" />
+
+        <!--
+            Receives PackageInstaller session results for in-app updates. Not exported: only the
+            system sends to it, via the PendingIntent created in ApkInstaller.
+        -->
+        <receiver
+            android:name=".util.ApkInstallReceiver"
+            android:exported="false" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

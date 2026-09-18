@@ -25,6 +25,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Accessibility
 import androidx.compose.material.icons.filled.AccountBalance
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Description
@@ -56,11 +57,14 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -73,7 +77,12 @@ import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.mw.offlineupi.ui.components.UpdateDialog
+import com.mw.offlineupi.util.ApkInstaller
+import com.mw.offlineupi.service.UssdAccessibilityService
+import com.mw.offlineupi.util.DiagnosticLog
+import com.mw.offlineupi.util.InstallResult
 import com.mw.offlineupi.util.SecurityUtil
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -83,6 +92,7 @@ fun SettingsScreen(
 ) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var showThemeDialog by remember { mutableStateOf(false) }
     var showSimDropdown by remember { mutableStateOf(false) }
     var showPinDialog by remember { mutableStateOf(false) }
@@ -228,6 +238,7 @@ fun SettingsScreen(
                     }
                 )
             }
+            PinStorageNote()
 
             Spacer(modifier = Modifier.height(20.dp))
 
@@ -339,6 +350,20 @@ fun SettingsScreen(
                         }
                     }
                 )
+                SettingsDivider()
+                SettingsClickItem(
+                    icon = Icons.Default.BugReport,
+                    title = "Diagnostics",
+                    // The bound state is the one thing that cannot be seen from system Settings:
+                    // the switch there can read On while the service was never bound to the app,
+                    // which is exactly the state in which nothing is automated and no overlay shows.
+                    subtitle = if (UssdAccessibilityService.getInstance() != null) {
+                        "Service bound. Tap to share a report"
+                    } else {
+                        "Service NOT bound — tap to share a report"
+                    },
+                    onClick = { DiagnosticLog.share(context) }
+                )
             }
 
             Spacer(modifier = Modifier.height(20.dp))
@@ -423,10 +448,17 @@ fun SettingsScreen(
     if (showPinDialog) {
         UpiPinDialog(
             onConfirm = { pin ->
-                viewModel.saveUpiPin(pin)
-                viewModel.setBiometric(true)
+                // saveUpiPin owns the array from here: it wipes it and flips the toggle itself,
+                // only if the auth-bound Keystore write succeeded.
                 showPinDialog = false
-                Toast.makeText(context, "Biometric payment enabled", Toast.LENGTH_SHORT).show()
+                viewModel.saveUpiPin(pin) { ok ->
+                    Toast.makeText(
+                        context,
+                        if (ok) "Biometric payment enabled"
+                        else "Couldn't store the PIN securely. Unlock your device and try again.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
             },
             onDismiss = { showPinDialog = false }
         )
@@ -437,12 +469,19 @@ fun SettingsScreen(
             update = update,
             onInstall = {
                 viewModel.dismissUpdate()
-                val url = update.downloadUrl.ifEmpty { update.htmlUrl }
-                context.startActivity(
-                    Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                scope.launch {
+                    val result = ApkInstaller.installUpdate(context, update)
+                    if (result is InstallResult.FallbackToBrowser ||
+                        result is InstallResult.DownloadFailed
+                    ) {
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse(update.htmlUrl)).apply {
+                                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                            }
+                        )
                     }
-                )
+                    // HashMismatch: do nothing — the tampered file was deleted.
+                }
             },
             onRemindLater = { viewModel.remindLater() },
             onIgnore = { viewModel.ignoreUpdate(update.versionName) }
@@ -657,15 +696,36 @@ private fun ThemeOption(
     }
 }
 
+/**
+ * Two-step UPI PIN capture.
+ *
+ * The PIN is held in fixed [CharArray] buffers rather than `String`s: `pin += digit` created a
+ * fresh interned-pool string per keystroke, leaving up to six partial PINs recoverable from the
+ * heap with no way to wipe them. The buffers here are zeroed on dispose, and [onConfirm]
+ * receives ownership of an exact-length copy.
+ *
+ * Deliberately not `rememberSaveable` — PIN digits must not reach the saved-instance-state
+ * bundle, so a configuration change discards the entry and the dialog restarts empty.
+ */
 @Composable
 private fun UpiPinDialog(
-    onConfirm: (String) -> Unit,
+    onConfirm: (CharArray) -> Unit,
     onDismiss: () -> Unit
 ) {
-    var pin by remember { mutableStateOf("") }
-    var confirmPin by remember { mutableStateOf("") }
+    val maxPinLength = 6
+    val pin = remember { CharArray(maxPinLength) }
+    val confirmPin = remember { CharArray(maxPinLength) }
+    var pinLength by remember { mutableIntStateOf(0) }
+    var confirmLength by remember { mutableIntStateOf(0) }
     var error by remember { mutableStateOf<String?>(null) }
-    var step by remember { mutableStateOf(1) } // 1 = enter, 2 = confirm
+    var step by remember { mutableIntStateOf(1) } // 1 = enter, 2 = confirm
+
+    DisposableEffect(Unit) {
+        onDispose {
+            pin.fill(' ')
+            confirmPin.fill(' ')
+        }
+    }
 
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,
@@ -684,35 +744,46 @@ private fun UpiPinDialog(
             )
         },
         text = {
-            Column {
+            // Scrollable: the numpad plus PinStorageDisclosure is taller than a short screen, and an
+            // AlertDialog text slot does not scroll on its own.
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                 Text(
-                    if (step == 1) "Enter your UPI PIN to store securely for biometric payments."
+                    if (step == 1) "Enter your UPI PIN to store it on this device for biometric payments."
                     else "Re-enter your UPI PIN to confirm.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                if (step == 1) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    PinStorageDisclosure()
+                }
                 Spacer(modifier = Modifier.height(16.dp))
                 PinDotsRow(
-                    pinLength = if (step == 1) pin.length else confirmPin.length,
-                    maxLength = 6
+                    pinLength = if (step == 1) pinLength else confirmLength,
+                    maxLength = maxPinLength
                 )
                 Spacer(modifier = Modifier.height(12.dp))
                 PinNumpad(
                     onDigit = { digit ->
-                        if (step == 1 && pin.length < 6) {
-                            pin += digit
+                        val c = digit.firstOrNull() ?: return@PinNumpad
+                        if (step == 1 && pinLength < maxPinLength) {
+                            pin[pinLength] = c
+                            pinLength++
                             error = null
-                        } else if (step == 2 && confirmPin.length < 6) {
-                            confirmPin += digit
+                        } else if (step == 2 && confirmLength < maxPinLength) {
+                            confirmPin[confirmLength] = c
+                            confirmLength++
                             error = null
                         }
                     },
                     onBackspace = {
-                        if (step == 1 && pin.isNotEmpty()) {
-                            pin = pin.dropLast(1)
+                        if (step == 1 && pinLength > 0) {
+                            pinLength--
+                            pin[pinLength] = ' '
                             error = null
-                        } else if (step == 2 && confirmPin.isNotEmpty()) {
-                            confirmPin = confirmPin.dropLast(1)
+                        } else if (step == 2 && confirmLength > 0) {
+                            confirmLength--
+                            confirmPin[confirmLength] = ' '
                             error = null
                         }
                     }
@@ -731,18 +802,22 @@ private fun UpiPinDialog(
             androidx.compose.material3.TextButton(
                 onClick = {
                     if (step == 1) {
-                        if (pin.length < 4) {
+                        if (pinLength < 4) {
                             error = "PIN must be 4-6 digits"
                         } else {
                             step = 2
                             error = null
                         }
                     } else {
-                        if (confirmPin != pin) {
+                        val matches = confirmLength == pinLength &&
+                            (0 until pinLength).all { pin[it] == confirmPin[it] }
+                        if (!matches) {
                             error = "PINs don't match"
-                            confirmPin = ""
+                            confirmPin.fill(' ')
+                            confirmLength = 0
                         } else {
-                            onConfirm(pin)
+                            // Hand over an exact-length copy; the buffers are wiped on dispose.
+                            onConfirm(pin.copyOf(pinLength))
                         }
                     }
                 }
@@ -754,7 +829,8 @@ private fun UpiPinDialog(
             androidx.compose.material3.TextButton(onClick = {
                 if (step == 2) {
                     step = 1
-                    confirmPin = ""
+                    confirmPin.fill(' ')
+                    confirmLength = 0
                     error = null
                 } else {
                     onDismiss()
@@ -843,4 +919,82 @@ private fun PinNumpad(
             }
         }
     }
+}
+
+/**
+ * Plain statement of what storing the UPI PIN means, shown at the moment the user is asked for it.
+ *
+ * Worth the screen space rather than being left to a policy document nobody opens. A user
+ * reasonably assumes a UPI PIN is only ever typed into their bank's own keypad, and NPCI's guidance
+ * says the same — so an app that keeps one has to say so while the user still has the choice, not
+ * afterwards. The honest version of the trade is also short enough to actually read.
+ *
+ * Worded as what happens rather than as reassurance. "Stored on this device" is the fact a user
+ * needs in order to decide; calling it "secure" is not, and the app saying so proves nothing.
+ */
+@Composable
+private fun PinStorageDisclosure() {
+    Card(
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.Info,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    "Where this PIN goes",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            val points = listOf(
+                "It is saved on this phone. It is never uploaded — this app has no account and no server that could receive it.",
+                "It is encrypted with a key inside your phone's secure hardware, which refuses to decrypt it without a fresh fingerprint or screen unlock.",
+                "It is used only to answer the PIN prompt of a payment you started yourself.",
+                "Turning Biometric for Payments off deletes it.",
+                "NPCI's guidance is that a UPI PIN should only be entered on your bank's own screen. Keeping it here is a convenience you are choosing — you can skip this and type it each time instead."
+            )
+            for (point in points) {
+                Row {
+                    Text(
+                        "•  ",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        point,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+            }
+        }
+    }
+}
+
+/**
+ * The same disclosure in one sentence, under the Security card, so it stays findable after the PIN
+ * has been stored — [PinStorageDisclosure] is only on screen while the switch is being turned on,
+ * and by definition a user who wants to check later has already dismissed it.
+ */
+@Composable
+private fun PinStorageNote() {
+    Text(
+        "Biometric payments keep your UPI PIN on this device, encrypted with a key your phone will " +
+            "not unlock without your fingerprint or screen lock. It is never uploaded, and turning " +
+            "the switch off deletes it.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp)
+    )
 }

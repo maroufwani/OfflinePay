@@ -14,6 +14,8 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,8 +29,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Lock
@@ -52,6 +56,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.getValue
@@ -78,6 +83,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -85,6 +91,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mw.offlineupi.util.shareReceiptScreenshot
+import com.mw.offlineupi.util.shareUnrecognisedResponse
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.LocalDateTime
@@ -733,11 +740,13 @@ fun SuccessScreen(
 fun FailureScreen(
     reason: String,
     onRetry: () -> Unit,
-    title: String = "Payment Failed"
+    title: String = "Payment Failed",
+    unrecognizedResponse: String? = null
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -771,21 +780,121 @@ fun FailureScreen(
             textAlign = TextAlign.Center
         )
 
+        if (!unrecognizedResponse.isNullOrBlank()) {
+            Spacer(modifier = Modifier.height(20.dp))
+            UnrecognisedResponseCard(response = unrecognizedResponse, flowLabel = title)
+        }
+
         Spacer(modifier = Modifier.height(32.dp))
         PrimaryButton(text = "Try Again", onClick = onRetry)
     }
 }
 
+/**
+ * Shown when a payment failed only because the app could not read the bank's reply.
+ *
+ * Treating an unreadable reply as a failure is the safe default and stays that way — but it is also
+ * the one failure the app could plausibly have got right, and the reply that caused it is
+ * deliberately never written to the log (see UssdManager.handleFinalResponse). Offering it to the
+ * user here is what turns the long tail of bank wordings from unfixable into fixable.
+ *
+ * The text is shown in full above the button rather than hidden behind it. The user is being asked
+ * to pass on bank text that may name their balance, so what they consent to should be the actual
+ * string in front of them, not a promise about it. Nothing is uploaded from this screen; see
+ * [com.mw.offlineupi.util.shareUnrecognisedResponse] for why there is no backend.
+ */
+@Composable
+private fun UnrecognisedResponseCard(response: String, flowLabel: String) {
+    val context = LocalContext.current
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(modifier = Modifier.padding(20.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.AutoMirrored.Filled.HelpOutline,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    "This reply was not recognised",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "Your bank sent wording the app has not seen before, so it could not tell whether " +
+                    "the payment went through. Check with your bank before trying again. Sharing " +
+                    "the reply below is what gets it recognised next time.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            SelectionContainer {
+                Text(
+                    response,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surface)
+                        .padding(12.dp)
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "Nothing is sent automatically. You pick where it goes and can edit it first.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(14.dp))
+            OutlinedButton(
+                onClick = { shareUnrecognisedResponse(context, response, flowLabel) },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Icon(
+                    Icons.Default.Share,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Report this response")
+            }
+        }
+    }
+}
+
+/**
+ * In-app PIN entry, used on the balance-check screen and as the fallback when the accessibility
+ * overlay cannot be shown.
+ *
+ * The PIN is handed to [onSubmitPin] as a `CharArray` so the receiver can wipe it. The backing
+ * field is unavoidably a `String`: `OutlinedTextField`'s value type is `String`, and Compose keeps
+ * its own copies inside the text-field state and the IME's history. This is a known, accepted
+ * limitation — the primary PIN surface is [com.mw.offlineupi.service.OverlayManager]'s custom
+ * numpad, which never allocates a `String` at all. The field state is cleared on dispose, and the
+ * state is deliberately not `rememberSaveable` so the PIN never reaches saved instance state.
+ */
 @Composable
 fun PinEntryCard(
     message: String,
-    onSubmitPin: (String) -> Unit,
+    onSubmitPin: (CharArray) -> Unit,
     onCancel: () -> Unit,
     modifier: Modifier = Modifier,
     wrongAttempts: Int = 0,
     errorMessage: String? = null
 ) {
     var pin by remember { mutableStateOf("") }
+    DisposableEffect(Unit) { onDispose { pin = "" } }
 
     Card(
         modifier = modifier
@@ -891,7 +1000,11 @@ fun PinEntryCard(
             Spacer(modifier = Modifier.height(24.dp))
             PrimaryButton(
                 text = "Confirm & Pay",
-                onClick = { onSubmitPin(pin) },
+                onClick = {
+                    val chars = pin.toCharArray()
+                    pin = ""
+                    onSubmitPin(chars)
+                },
                 enabled = pin.length in 4..6
             )
             Spacer(modifier = Modifier.height(8.dp))

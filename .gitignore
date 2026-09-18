@@ -58,3 +58,15 @@ Desktop.ini
 
 # Signing config
 signing.properties
+
+# Landing page
+landing/
+
+# Build output / distribution artifacts
+dist/
+
+# Cloudflare Wrangler cache
+.wrangler/
+
+# Agent tooling
+.agents/

@@ -1,6 +1,7 @@
 package com.mw.offlineupi.ui.balance
 
 import android.app.Application
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.mw.offlineupi.OfflineUpiApp
@@ -8,11 +9,17 @@ import com.mw.offlineupi.service.UssdCommand
 import com.mw.offlineupi.service.UssdCommandType
 import com.mw.offlineupi.service.UssdManager
 import com.mw.offlineupi.service.UssdState
+import com.mw.offlineupi.util.BalanceParser
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
 class BalanceCheckViewModel(application: Application) : AndroidViewModel(application) {
+
+    private companion object {
+        const val TAG = "BalanceCheckVM"
+    }
+
     private val app = application as OfflineUpiApp
     private val _lastBalance = MutableStateFlow("")
     val lastBalance: StateFlow<String> = _lastBalance
@@ -30,16 +37,32 @@ class BalanceCheckViewModel(application: Application) : AndroidViewModel(applica
     }
 
     fun checkBalance() {
-        UssdManager.startCommand(app, UssdCommand(type = UssdCommandType.CHECK_BALANCE))
-    }
-
-    fun saveBalance(balance: String) {
         viewModelScope.launch {
-            app.preferences.setLastBalance(balance)
+            UssdManager.startCommand(app, UssdCommand(type = UssdCommandType.CHECK_BALANCE))
         }
     }
 
-    fun sendPin(pin: String) {
+    /**
+     * Persists the balance from a successful CHECK_BALANCE response.
+     *
+     * Only the number is stored. [rawMessage] is the bank's whole USSD reply — up to 200 characters
+     * that can include a masked account number and the bank's own wording — and it used to be
+     * written to encrypted prefs verbatim and then rendered as "Last Known Balance". If no amount
+     * can be found, nothing is written: a stale number is more useful than the raw text, and the
+     * response itself is not something to keep on disk.
+     */
+    fun saveBalance(rawMessage: String) {
+        val amount = BalanceParser.extractAmount(rawMessage)
+        if (amount == null) {
+            Log.w(TAG, "No amount found in balance response (${rawMessage.length} chars); not stored")
+            return
+        }
+        viewModelScope.launch {
+            app.preferences.setLastBalance(amount)
+        }
+    }
+
+    fun sendPin(pin: CharArray) {
         UssdManager.sendPinResponse(pin)
     }
 

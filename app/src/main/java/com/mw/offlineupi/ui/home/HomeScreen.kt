@@ -64,11 +64,9 @@ import com.mw.offlineupi.data.local.entity.TransactionEntity
 import com.mw.offlineupi.ui.navigation.Screen
 import com.mw.offlineupi.ui.theme.Primary
 import com.mw.offlineupi.ui.theme.Success
+import com.mw.offlineupi.util.DateFormats
 import com.mw.offlineupi.util.Validators
-import java.text.SimpleDateFormat
 import java.util.Calendar
-import java.util.Date
-import java.util.Locale
 
 @Composable
 fun HomeScreen(
@@ -624,14 +622,13 @@ private fun TransactionItem(transaction: TransactionEntity, onClick: () -> Unit 
 private fun formatRelativeTime(timestamp: Long): String {
     val now = Calendar.getInstance()
     val txnTime = Calendar.getInstance().apply { timeInMillis = timestamp }
-    val timeFormat = SimpleDateFormat("hh:mm a", Locale.getDefault())
-    val time = timeFormat.format(Date(timestamp))
+    val time = DateFormats.time(timestamp)
 
     return when {
         now.get(Calendar.YEAR) == txnTime.get(Calendar.YEAR) &&
                 now.get(Calendar.DAY_OF_YEAR) == txnTime.get(Calendar.DAY_OF_YEAR) -> "Today, $time"
         now.get(Calendar.YEAR) == txnTime.get(Calendar.YEAR) &&
                 now.get(Calendar.DAY_OF_YEAR) - txnTime.get(Calendar.DAY_OF_YEAR) == 1 -> "Yesterday, $time"
-        else -> SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date(timestamp))
+        else -> DateFormats.dayMonthTime(timestamp)
     }
 }

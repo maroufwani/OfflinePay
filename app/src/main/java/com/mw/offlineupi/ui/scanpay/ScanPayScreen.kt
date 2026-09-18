@@ -3,6 +3,7 @@ package com.mw.offlineupi.ui.scanpay
 import android.Manifest
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.util.Log
 import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -72,6 +73,7 @@ import com.mw.offlineupi.ui.components.StatusMessage
 import com.mw.offlineupi.ui.components.SuccessScreen
 import com.mw.offlineupi.ui.components.UssdProgressIndicator
 import com.mw.offlineupi.ui.components.rememberUssdPermissionLauncher
+import com.mw.offlineupi.util.DiagnosticLog
 
 @Composable
 fun ScanPayScreen(
@@ -165,6 +167,7 @@ fun ScanPayScreen(
                     val failed = ussdState as UssdState.Failed
                     FailureScreen(
                         reason = failed.reason,
+                        unrecognizedResponse = failed.unrecognizedResponse,
                         onRetry = { viewModel.rescan() }
                     )
                 }
@@ -216,12 +219,29 @@ fun ScanPayScreen(
                         if (hasCameraPermission) {
                             var isTorchOn by remember { mutableStateOf(false) }
                             var cameraRef by remember { mutableStateOf<Camera?>(null) }
+                            var cameraError by remember { mutableStateOf<String?>(null) }
 
                             QrScannerView(
                                 onQrScanned = viewModel::onQrScanned,
                                 onCameraBound = { cameraRef = it },
+                                onCameraError = { cameraError = it },
                                 modifier = Modifier.fillMaxSize()
                             )
+
+                            // A failed init leaves the preview a blank surface, so without this
+                            // the screen just sits there looking broken with no way to report it.
+                            cameraError?.let { err ->
+                                Text(
+                                    text = "Camera unavailable (" + err + "). " +
+                                        "Enter the UPI ID manually, and send a report from " +
+                                        "Settings > Diagnostics.",
+                                    textAlign = TextAlign.Center,
+                                    color = Color.White,
+                                    modifier = Modifier
+                                        .align(Alignment.Center)
+                                        .padding(24.dp)
+                                )
+                            }
 
                             // Flashlight toggle button
                             IconButton(
@@ -347,9 +367,9 @@ fun ScanPayScreen(
 private fun QrScannerView(
     onQrScanned: (String) -> Unit,
     onCameraBound: (Camera) -> Unit = {},
+    onCameraError: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var hasScanned by remember { mutableStateOf(false) }
 
@@ -360,47 +380,56 @@ private fun QrScannerView(
             val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
 
             cameraProviderFuture.addListener({
-                val cameraProvider = cameraProviderFuture.get()
-                val preview = Preview.Builder().build().also {
-                    it.surfaceProvider = previewView.surfaceProvider
-                }
+                // Everything below runs on the main thread and every call in it can throw: get()
+                // rethrows a CameraX initialisation failure, and BarcodeScanning.getClient()
+                // resolves the bundled ML Kit model. Only bindToLifecycle used to be guarded, so
+                // anything else throwing took the process down instead of leaving the user on a
+                // screen they could back out of.
+                //
+                // The cause is recorded rather than swallowed. In a minified build this is the
+                // only place the real class name survives, and it is what Settings -> Diagnostics
+                // reports back.
+                try {
+                    val cameraProvider = cameraProviderFuture.get()
+                    val preview = Preview.Builder().build().also {
+                        it.surfaceProvider = previewView.surfaceProvider
+                    }
 
-                val imageAnalysis = ImageAnalysis.Builder()
-                    .setTargetResolution(Size(1280, 720))
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build()
+                    val imageAnalysis = ImageAnalysis.Builder()
+                        .setTargetResolution(Size(1280, 720))
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .build()
 
-                val scanner = BarcodeScanning.getClient()
+                    val scanner = BarcodeScanning.getClient()
 
-                imageAnalysis.setAnalyzer(ContextCompat.getMainExecutor(ctx)) { imageProxy ->
-                    val mediaImage = imageProxy.image
-                    if (mediaImage != null && !hasScanned) {
-                        val image = InputImage.fromMediaImage(
-                            mediaImage,
-                            imageProxy.imageInfo.rotationDegrees
-                        )
-                        scanner.process(image)
-                            .addOnSuccessListener { barcodes ->
-                                for (barcode in barcodes) {
-                                    if (barcode.valueType == Barcode.TYPE_TEXT ||
-                                        barcode.valueType == Barcode.TYPE_URL
-                                    ) {
-                                        barcode.rawValue?.let { value ->
-                                            if (value.startsWith("upi://") && !hasScanned) {
-                                                hasScanned = true
-                                                onQrScanned(value)
+                    imageAnalysis.setAnalyzer(ContextCompat.getMainExecutor(ctx)) { imageProxy ->
+                        val mediaImage = imageProxy.image
+                        if (mediaImage != null && !hasScanned) {
+                            val image = InputImage.fromMediaImage(
+                                mediaImage,
+                                imageProxy.imageInfo.rotationDegrees
+                            )
+                            scanner.process(image)
+                                .addOnSuccessListener { barcodes ->
+                                    for (barcode in barcodes) {
+                                        if (barcode.valueType == Barcode.TYPE_TEXT ||
+                                            barcode.valueType == Barcode.TYPE_URL
+                                        ) {
+                                            barcode.rawValue?.let { value ->
+                                                if (value.startsWith("upi://") && !hasScanned) {
+                                                    hasScanned = true
+                                                    onQrScanned(value)
+                                                }
                                             }
                                         }
                                     }
                                 }
-                            }
-                            .addOnCompleteListener { imageProxy.close() }
-                    } else {
-                        imageProxy.close()
+                                .addOnCompleteListener { imageProxy.close() }
+                        } else {
+                            imageProxy.close()
+                        }
                     }
-                }
 
-                try {
                     cameraProvider.unbindAll()
                     val camera = cameraProvider.bindToLifecycle(
                         lifecycleOwner,
@@ -409,7 +438,11 @@ private fun QrScannerView(
                         imageAnalysis
                     )
                     onCameraBound(camera)
-                } catch (_: Exception) { }
+                } catch (t: Throwable) {
+                    Log.e("ScanPayScreen", "Camera initialisation failed", t)
+                    DiagnosticLog.logThrowable("camera init FAILED", t)
+                    onCameraError(t.javaClass.simpleName)
+                }
             }, ContextCompat.getMainExecutor(ctx))
 
             previewView
