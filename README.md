@@ -1,120 +1,150 @@
 # Offline Pay
 
-An Android app that enables payments without internet using the `*99#` USSD service. The app provides a modern UI for managing USSD-based payment flows via mobile network (no data connection required).
+**Send money, check your balance, and pay by QR — even with no internet.**
 
-## Disclaimer
+Offline Pay lets you make UPI payments over your mobile network using India's `*99#` service, so you can pay when you have no data and no Wi-Fi — on a patchy signal, while travelling, or after you've run out of data. It puts a clean, modern screen in front of the old `*99#` dialer menus and fills them in for you.
 
-> **This application is NOT affiliated with, endorsed by, or approved by the National Payments Corporation of India (NPCI), the Reserve Bank of India (RBI), or any bank or telecom operator.**
->
-> This is an independent, community-developed open-source project. It automates interaction with the publicly available `*99#` USSD service. **Use at your own risk.**
->
-> This application is **NOT** a payment system, payment aggregator, or payment gateway under the Payment and Settlement Systems Act, 2007. No license under the PSS Act is required or held.
->
-> The developers of this application assume no liability for:
-> - Failed, incorrect, or duplicate transactions
-> - Account suspension or blocking by your bank or telecom operator
-> - Any financial loss incurred through use of this application
-> - Violations of your bank's terms of service or applicable regulations
->
-> **By using this application, you acknowledge that you understand the risks involved in automating USSD-based financial transactions.**
->
-> See [DISCLAIMER.md](DISCLAIMER.md) for the full legal disclaimer.
+> **Beta software.** This is an early release. It automates real money transfers, so mistakes can cost you. Please read the [Before you start](#before-you-start) section — it matters.
 
-## How It Works
+---
 
-The app uses Android's `CALL_PHONE` permission to dial USSD codes (`*99#`) and an Accessibility Service to navigate the USSD menu dialogs automatically. All processing happens locally on your device — **no data is sent to any server**.
+## What you can do
 
-### Accessibility Service Usage
+- **Send money** to a mobile number or a UPI ID
+- **Request money** from someone
+- **Check your bank balance**
+- **Scan a QR code** to pay
+- **See your history** of past transactions
+- **Save people you pay often** as favorites
+- **Lock the app** with your fingerprint or face
+- Use it on **either SIM** if you have two
+- Pick a **light, dark, or automatic** theme
 
-This app uses Android's Accessibility Service to read and interact with USSD dialog windows from the system phone app (`com.android.phone`). This is required because Android does not provide a standard API for USSD menu navigation.
+---
 
-**Important:** This usage pattern may not comply with Google Play Store policies for Accessibility Service usage. This app is intended for **sideloading only** and is not suitable for distribution on the Google Play Store without architectural changes.
+## Before you start
 
-## Features
+Offline Pay is an independent, open-source app. **It is not made by, or connected to, your bank, NPCI, RBI, or your mobile operator.** It simply automates the `*99#` menu that already exists on your phone.
 
-- Send money via mobile number or payee address
-- Request money
-- Check account balance
-- Scan QR codes for payments
-- Transaction history
-- Favorite recipients
-- Biometric app lock
-- Dark/Light/System theme support
-- Dual SIM support
+A few honest things to know:
 
-## Permissions
+- **You use it at your own risk.** Payments go through your bank's real `*99#` service, and a failed or wrong transfer is possible — as it is with any payment method.
+- **Standard USSD charges may apply** from your telecom operator for each `*99#` session.
+- **Your bank's rules still apply.** Make sure you're allowed to use `*99#` on your account.
+- Because of how it works (see [How it works](#how-it-works)), the app is meant to be **installed directly (sideloaded)**, not from the Play Store.
 
-| Permission | Purpose |
+The full legal text is in the [Disclaimer](DISCLAIMER.md), [Terms of Service](TERMS_OF_SERVICE.md), and [Privacy Policy](PRIVACY_POLICY.md).
+
+---
+
+## What you need
+
+- An **Android phone running Android 8.0 or newer**
+- A **SIM card** with a mobile-network signal (this is what carries the payment — you do *not* need internet)
+- A **bank account linked to `*99#` / UPI** (if you've used `*99#` before, you're set)
+- Your **UPI PIN**
+
+---
+
+## Getting started
+
+### 1. Install the app
+
+1. Download the latest `OfflinePay-*.apk` from the [**Releases page**](https://github.com/maroufwani/OfflinePay/releases/latest).
+2. Open the file on your phone. Android will ask to allow installing from this source — say yes.
+3. Tap **Install**.
+
+The app can also tell you when a newer version is out and offer to update itself.
+
+### 2. First-time setup
+
+When you open the app the first time, it walks you through a short setup:
+
+- Confirms your phone number (used to place the `*99#` call)
+- Asks for the permissions it needs (explained below)
+- Lets you set up a fingerprint/face lock if you want one
+
+Once that's done, you're on the home screen and ready to pay.
+
+### 3. Make your first payment
+
+1. Tap **Send Money**.
+2. Enter a mobile number or UPI ID, or **scan a QR code**.
+3. Enter the amount.
+4. Confirm — the app dials `*99#` and steps through the menu for you.
+5. Enter your **UPI PIN** when asked. The money moves over the mobile network.
+
+Your balance check and money requests work the same way: pick the action, and the app handles the `*99#` menus.
+
+---
+
+## Your privacy
+
+**Everything stays on your phone.** Offline Pay has no server and sends none of your information anywhere. Your transaction history, saved recipients, and settings live only on your device.
+
+What's stored locally, just for the app to work:
+
+- Your phone number (to place the `*99#` call)
+- Contacts you choose to pay
+- Your transaction history and saved recipients
+- Your app settings (theme, SIM choice, lock)
+
+Uninstalling the app removes this data. Details are in the [Privacy Policy](PRIVACY_POLICY.md).
+
+---
+
+## Permissions, in plain words
+
+The app only asks for what it needs to place a payment call and read the `*99#` menu:
+
+| It asks for | So it can |
 |---|---|
-| `CALL_PHONE` | Required to dial USSD codes (`*99#`) |
-| `READ_PHONE_STATE` | Required to detect SIM card and network state |
-| `READ_CONTACTS` | Optional — used to select payment recipients from contacts |
-| `CAMERA` | Optional — used for scanning QR codes |
-| `ACCESSIBILITY_SERVICE` | Required to navigate USSD menu dialogs |
+| **Phone calls** | Dial the `*99#` payment code |
+| **Phone/SIM state** | Know which SIM and network to use |
+| **Accessibility** | Read and tap through the `*99#` menu screens for you |
+| **Camera** *(optional)* | Scan QR codes to pay |
+| **Contacts** *(optional)* | Let you pick a recipient from your contacts |
 
-## Building
+You can skip the optional ones and still send money.
 
-### Prerequisites
-- Android Studio Ladybug or later
-- JDK 11+
-- Android SDK with API level 36
+---
 
-### Build
+## How it works
+
+Android has no normal way for an app to drive the `*99#` menu, so Offline Pay uses an **Accessibility Service** to read the `*99#` dialog boxes from your phone's dialer and tap through them automatically. The payment itself travels over your **mobile network**, which is why it works with no internet.
+
+Because using the Accessibility Service this way doesn't fit Google Play's rules for that permission, the app is built for **direct install (sideloading)** rather than the Play Store.
+
+---
+
+## Need help or found a bug?
+
+- Something not working? [**Open an issue**](https://github.com/maroufwani/OfflinePay/issues) and tell us what happened, your phone model, and your Android version.
+- Found a security problem? Please follow the [Security Policy](SECURITY.md) to report it privately.
+
+---
+
+## For developers
+
+Offline Pay is open source under the [Apache License 2.0](LICENSE). Contributions are welcome — see [Contributing](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+**Build it yourself:**
+
 ```bash
-git clone <repo-url>
-cd OfflineUPI
+git clone https://github.com/maroufwani/OfflinePay.git
+cd OfflinePay
 ./gradlew assembleDebug
 ```
 
-The APK will be at `app/build/outputs/apk/debug/app-debug.apk`.
+The debug APK lands at `app/build/outputs/apk/debug/app-debug.apk`.
 
-## Privacy
+- **Requirements:** Android Studio (Ladybug or later), JDK 11+, Android SDK API 36
+- **Minimum device:** Android 8.0 (API 26)
 
-All data is stored **locally on your device only**. No data is transmitted to any server. See [PRIVACY_POLICY.md](PRIVACY_POLICY.md) for details.
+More project documents: [Changelog](CHANGELOG.md) · [Terms of Service](TERMS_OF_SERVICE.md) · [Regulatory notes](#regulatory-note)
 
-### Data stored locally:
-- Phone number (for USSD dialing)
-- Contact information (names and numbers, for recipient selection)
-- Transaction history (amounts, recipients, timestamps)
-- Recipient list (names, identifiers)
-- App preferences (theme, SIM slot, lock settings)
+---
 
-## Legal Documents
+## Regulatory note
 
-| Document | Description |
-|---|---|
-| [Privacy Policy](PRIVACY_POLICY.md) | Data handling, DPDPA 2023, IT Act, SPDI Rules compliance |
-| [Terms of Service](TERMS_OF_SERVICE.md) | Usage terms, liability, regulatory compliance, dispute resolution |
-| [Disclaimer](DISCLAIMER.md) | Risk acknowledgment, warranty disclaimer, limitation of liability |
-| [License](LICENSE) | Apache License, Version 2.0 |
-| [Changelog](CHANGELOG.md) | Version history and release notes |
-| [Security Policy](SECURITY.md) | Vulnerability reporting and security measures |
-| [Contributing](CONTRIBUTING.md) | Contribution guidelines |
-| [Code of Conduct](CODE_OF_CONDUCT.md) | Community standards |
-
-## Regulatory Notice
-
-This application interacts with India's `*99#` USSD payment service, which is regulated by NPCI and RBI. Users are responsible for ensuring their use of this application complies with:
-
-- Their bank's terms of service
-- **RBI** regulations on digital payments
-- **NPCI** guidelines for `*99#` service usage
-- **Payment and Settlement Systems Act, 2007**
-- **Information Technology Act, 2000** and SPDI Rules, 2011
-- **Digital Personal Data Protection Act, 2023**
-- **Prevention of Money Laundering Act, 2002**
-- **Indian Telegraph Act, 1885** (for USSD/telecom usage)
-- **Consumer Protection Act, 2019**
-- Applicable bank-specific and telecom operator terms
-
-This application **does not hold any payment system license** and is **not a payment service provider, payment aggregator, or intermediary** under any Indian law.
-
-## Contributing
-
-Contributions are welcome! Please read the [Contributing Guidelines](CONTRIBUTING.md) before getting started.
-
-All participants are expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
-
-## License
-
-Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full text.
+Offline Pay interacts with India's `*99#` USSD service, which is governed by NPCI and RBI. **It does not hold any payment-system license and is not a payment service provider, aggregator, or intermediary** under Indian law. You are responsible for using it in line with your bank's terms, RBI and NPCI guidelines, and applicable law (including the PSS Act 2007, IT Act 2000 and SPDI Rules, DPDP Act 2023, and Consumer Protection Act 2019). See the [Disclaimer](DISCLAIMER.md) and [Terms of Service](TERMS_OF_SERVICE.md) for the complete text.
